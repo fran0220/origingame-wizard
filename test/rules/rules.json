@@ -1,0 +1,13 @@
+{
+  "models": { "analyze": "deepseek-v4.1-flash", "deep": "deepseek-v4-pro", "image": "qwen-image-2.1-turbo-aliyun" },
+  "images": {
+    "cover": { "size": "1664x928", "fallback": "1280x720", "output": "1280x720", "candidates": 3 },
+    "poster": { "size": "1140x1472", "fallback": "960x1280", "output": "1080x1440", "candidates": 2 }
+  },
+  "engines": [
+    { "id": "godot", "markers": ["*.pck", "project.godot", "*.html:GODOT_CONFIG"] },
+    { "id": "threejs", "markers": ["package.json:\"three\"", "three.module.js", "three.module.min.js", "three.min.js", "three.core.js", "*.html:three.module", "*.html:/three@", "*.html:\"three\":"] },
+    { "id": "html", "markers": ["index.html", "*.html"] }
+  ],
+  "genres": ["arcade", "action", "puzzle", "shooter", "platformer", "racing", "strategy", "casual", "education", "cards", "other"]
+}
