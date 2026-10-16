@@ -160,10 +160,11 @@ export async function startPlatform({ rulesDir }) {
       res.writeHead(204).end()
       return
     }
-    if (route === 'GET /identity/v1/me') {
+    if (route === 'GET /identity/v1/connector/session') {
+      // Identity's device-session answer has no numeric account id (identity-service internal/api/desktop.go connectorSession).
       const token = bearer(req)
       if (!token || !state.deviceTokens.has(token) || state.revokedDevices.has(token)) return fail(res, 401, 'unauthorized', 'Invalid credential')
-      return json(res, 200, ACCOUNT)
+      return json(res, 200, { device_id: 'dev_1', client: 'wizard', account: { username: ACCOUNT.username, display_name: ACCOUNT.display_name } })
     }
     if (route === 'POST /identity/v1/wizard/sessions') {
       const token = bearer(req)

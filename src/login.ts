@@ -82,11 +82,12 @@ export async function logout(host: string): Promise<{ revoked: boolean; removed:
 export async function whoami(host: string): Promise<{ account: Account; host: string; verified: boolean }> {
   const credential = storedCredential(host)
   if (!credential) throw new WizardError('not_logged_in', `not signed in to ${host}; run \`npx origingame login\``)
-  const response = await request(`${host}/identity/v1/me`, { headers: { authorization: `Bearer ${credential.token}` } }).catch(() => null)
-  if (response?.status === 401) throw new WizardError('not_logged_in', 'the saved sign-in was revoked; run `npx origingame login`')
-  const me = response?.ok ? response.json?.user ?? response.json : null
-  const account: Account | null = me && typeof me.id === 'number'
-    ? { id: me.id, username: String(me.username ?? ''), display_name: String(me.display_name ?? me.username ?? '') }
+  // The device credential's own session route (`GET /identity/v1/connector/session`): 401 once revoked or expired.
+  const response = await request(`${host}/identity/v1/connector/session`, { headers: { authorization: `Bearer ${credential.token}` } }).catch(() => null)
+  if (response?.status === 401 || response?.status === 409) throw new WizardError('not_logged_in', 'the saved sign-in was revoked; run `npx origingame login`')
+  const live = response?.ok ? response.json?.account : null
+  const account: Account | null = credential.account && live
+    ? { id: credential.account.id, username: String(live.username ?? credential.account.username), display_name: String(live.display_name ?? live.username ?? credential.account.display_name) }
     : credential.account
   if (!account) throw new WizardError('not_logged_in', 'could not read the signed-in account')
   return { account, host, verified: Boolean(response?.ok) }
