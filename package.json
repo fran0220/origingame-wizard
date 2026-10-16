@@ -1,0 +1,51 @@
+{
+  "name": "origingame",
+  "version": "0.1.0",
+  "description": "Origin Wizard: analyze a web game, adapt it to OriginGame and publish it in one command. Model and cover-art costs are paid by the platform.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "origingame": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/origingame/wizard.git"
+  },
+  "homepage": "https://github.com/origingame/wizard#readme",
+  "bugs": "https://github.com/origingame/wizard/issues",
+  "keywords": [
+    "origingame",
+    "game",
+    "deploy",
+    "html5",
+    "threejs",
+    "godot",
+    "wizard"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "jpeg-js": "^0.4.4",
+    "picocolors": "^1.1.1",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.9.3"
+  }
+}
