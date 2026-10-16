@@ -388,6 +388,21 @@ describe('failures', () => {
     }
   })
 
+  test('a build Portal would refuse fails with upload_failed before any model call', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const project = copyFixture('plain-html')
+    fs.writeFileSync(path.join(project, 'assets', 'huge.bin'), Buffer.alloc(51 * 1024 * 1024))
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const run = since(m)
+    report.scenarios.overLimit = { exitCode: cli.code, result: cli.result, chatCalls: run.chat.length }
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'upload_failed')
+    assert.match(cli.result.error.message, /assets\/huge\.bin/)
+    assert.equal(run.chat.length, 0, 'no model spend')
+    assert.equal(run.sessions[0].revoked, true)
+  })
+
   test('not signed in under CI: not_logged_in, exit 1', async () => {
     const cli = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--host', platform.origin], { home: tempDir('home'), env: { CI: '1' } })
     report.scenarios.notLoggedIn = { exitCode: cli.code, result: cli.result }

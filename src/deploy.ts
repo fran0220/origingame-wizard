@@ -20,7 +20,7 @@ import { Portal, publishError } from './portal.js'
 import { fetchRules, type Rules } from './rules.js'
 import { findSecrets } from './secrets.js'
 import { issueSession, readSandboxFile, revokeSession, type PortalAuth, type Sandbox, type WizardSession } from './session.js'
-import { checkPortalLimits, stageCopy, stageManifest } from './stage.js'
+import { checkPortalLimits, precheckPortalLimits, stageCopy, stageManifest } from './stage.js'
 import { ADAPT_SCHEMA, analyze, mergePlan, metadataSchema, type Edit, type Metadata } from './tasks.js'
 import type { Telemetry } from './telemetry.js'
 import type { Ui } from './ui.js'
@@ -173,6 +173,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       for (const w of built.warnings) ui.warn(w)
       const staged = stageCopy(built.outputDir, site)
       if (staged.excluded.length) ui.info(`Left out of the upload: ${staged.excluded.slice(0, 8).map(e => `${e.path} (${e.reason})`).join(', ')}${staged.excluded.length > 8 ? ` and ${staged.excluded.length - 8} more` : ''}`)
+      precheckPortalLimits(site)
       return built
     }
     let built = await prepare()

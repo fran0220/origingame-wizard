@@ -59,6 +59,13 @@ export function stageManifest(site: string): Manifest {
   return { entries, hash: sha256(json), totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local }
 }
 
+/** The same limits from sizes alone (no hashing), right after staging and before any model call. */
+export function precheckPortalLimits(site: string): void {
+  const entries = listFiles(site).map(file => ({ path: file.normalize('NFC'), sizeBytes: fs.statSync(path.join(site, file)).size, sha256: '' }))
+  const ignoreEntry = { entries: entries.some(e => e.path === 'index.html') ? entries : [...entries, { path: 'index.html', sizeBytes: 0, sha256: '' }] }
+  checkPortalLimits({ ...ignoreEntry, hash: '', totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local: new Map() })
+}
+
 /** Fails before any upload (or model spend) when Portal would refuse the files. */
 export function checkPortalLimits(manifest: Manifest): void {
   const { entries } = manifest

@@ -140,7 +140,7 @@ export async function buildProject(projectDir: string, detection: Detection, sta
   if (prebuilt) {
     const outputDir = path.resolve(prebuilt)
     if (!fs.existsSync(outputDir) || !fs.statSync(outputDir).isDirectory()) throw new WizardError('detect_failed', `--prebuilt ${prebuilt} is not a directory`)
-    return { outputDir, entry: 'index.html', built: false, warnings: [] }
+    return { outputDir, entry: detection.entry, built: false, warnings: [] }
   }
   switch (detection.kind) {
     case 'node-build': return nodeBuild(projectDir, detection, stageDir, ui)
