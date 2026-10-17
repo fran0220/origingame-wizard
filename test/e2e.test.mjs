@@ -173,6 +173,7 @@ describe('deploy --yes --json', () => {
     assert.equal(deploy.files['assets/bg.png'].toString('hex'), fs.readFileSync(path.join(project, 'assets/bg.png')).toString('hex'))
     assert.equal(r.stageSha256, platform.state.uploads.get(deploy.fields.sourceUploadId).manifestHash)
     assert.equal(deploy.fields.title, 'Star Catcher')
+    assert.equal(r.title, deploy.fields.title, 'the report names the title it published')
     assert.equal(deploy.fields.engine, 'html')
     assert.equal(deploy.fields.orientation, 'landscape')
     assert.equal(deploy.fields.genre, 'arcade')

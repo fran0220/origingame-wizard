@@ -18,10 +18,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/origingame/wizard.git"
+    "url": "git+https://github.com/fran0220/origingame-wizard.git"
   },
-  "homepage": "https://github.com/origingame/wizard#readme",
-  "bugs": "https://github.com/origingame/wizard/issues",
+  "homepage": "https://github.com/fran0220/origingame-wizard#readme",
+  "bugs": "https://github.com/fran0220/origingame-wizard/issues",
   "keywords": [
     "origingame",
     "game",

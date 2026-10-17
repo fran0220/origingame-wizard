@@ -35,6 +35,8 @@ export interface DeployResult {
   slug: string
   version: number
   releaseId: string
+  /** The listing title sent with this publication, or null when an update kept the existing one. */
+  title: string | null
   playUrl: string
   portalUrl: string
   readiness: Record<string, unknown>
@@ -351,6 +353,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
 
     const result: DeployResult = {
       ok: true, action, ...published,
+      title: metadata?.title ?? options.title?.trim() ?? null,
       playUrl: String(body.playUrl ?? ''), portalUrl: String(body.portalUrl ?? ''),
       readiness, warnings, engine: detection.engine, stageSha256: manifest.hash, rulesVersion: rules.version, adaptations,
       usage: { sessionId: active.session_id, quota: active.budget_quota, ...usage },
