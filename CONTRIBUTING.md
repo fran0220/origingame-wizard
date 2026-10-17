@@ -48,3 +48,12 @@ covers and confirm it fails. Never read source text in a test.
 Keep changes small and focused, describe the user-visible effect, and run
 `npm test`. The project directory must stay byte-identical after a run without
 `--integrate`; the end-to-end tests check it.
+
+## Releases
+
+Maintainers bump `version` in `package.json` on main and push a `vX.Y.Z` tag.
+`.github/workflows/release.yml` runs the tests and publishes to npm with
+provenance through npm trusted publishing; no npm token is stored in the
+repository. The platform pins an exact version (Agent Server's
+`WIZARD_COMMAND`, the E2B templates), so a release reaches threads only when
+the platform moves its pin.

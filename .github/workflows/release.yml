@@ -1,0 +1,30 @@
+name: Release
+
+# Publishes to npm with provenance through npm trusted publishing (OIDC):
+# no token is stored in this repository. Tag a commit on main as vX.Y.Z whose
+# package.json version is X.Y.Z.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm install -g npm@11
+      - name: Tag matches package version
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --provenance --access public
