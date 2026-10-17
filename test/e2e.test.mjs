@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { ACCOUNT, DEVICE_TOKEN, MODELS, imageDims, portalAccepts, startPlatform } from './fake-platform.mjs'
-import { ROOT, cleanTemp, copyFixture, runCli, sha256, signedInHome, tempDir, treeHash } from './helpers.mjs'
+import { ROOT, cleanTemp, copyFixture, runCli, sha256, signedInHome, tempDir, treeHash, treeHashExcept } from './helpers.mjs'
 
 const RULES_DIR = process.env.WIZARD_RULES_DIR ?? path.join(ROOT, 'test', 'rules')
 const ARTIFACTS = path.join(ROOT, 'test-artifacts')
@@ -69,13 +69,14 @@ function scriptFor(name) {
         summary: 'Submits the final score when a run ends.',
         edits: [
           { path: 'game.js', find: '  state.over = true\n', replace: "  state.over = true\n  window.OriginPlayer?.call('leaderboard.submit', { score: state.score }).catch(() => {})\n" },
-          { path: 'index.html', find: '  <script src="/game.js"></script>', replace: '  <script src="og-player.js"></script>\n  <script src="/game.js"></script>' },
+          { path: 'index.html', find: '  <script src="game.js"></script>', replace: '  <script src="og-player.js"></script>\n  <script src="game.js"></script>' },
         ],
         new_files: [{ path: 'og-player.js', content: '// og-player.js (fixture)\nwindow.OriginPlayer = { call: () => Promise.reject(new Error(\'no player\')), ready() {} }\n' }],
         methods: ['leaderboard.submit'],
       }
     }
-    if (name === 'integrate' && task === 'analyze') return { summary: 'Star Catcher with scores wired.', orientation: 'landscape', items: [] }
+    if ((name === 'integrate' || name === 'integrate-again') && task === 'analyze') return { summary: 'Star Catcher with scores wired.', orientation: 'landscape', items: [] }
+    if (task === 'integrate') return { summary: 'Nothing to wire.', edits: [], new_files: [], methods: [] }
     if (task === 'analyze') return { summary: 'A game.', orientation: 'any', items: [] }
     if (task === 'adapt') return { edits: [] }
     throw new Error(`unscripted task ${task}`)
@@ -158,11 +159,15 @@ describe('deploy --yes --json', () => {
     assert.match(r.rulesVersion, /^[0-9a-f]{16}$/)
     assert.equal(r.usage.sessionId, run.sessions[0].session_id)
     assert.equal(afterHash, beforeHash, 'project directory is byte-identical')
-    assert.equal(r.source, null)
-    assert.equal(run.requests.filter(q => q.path.startsWith('/v1/repositories') || q.path.startsWith('/v1/memberships') || q.path.startsWith('/v1/checkpoints') || q.path.startsWith('/git/')).length, 0, 'without --with-source nothing reaches Agent Service')
+    // The source is saved by default, without the credential files or the file with a key-like line.
+    assert.match(r.source?.checkpointId ?? '', /^[0-9a-f]{32}$/)
+    assert.deepEqual(r.source.withheld.map(w => w.path).sort(), ['.env', 'analytics.js', 'id_ed25519'])
 
     const deploy = run.deploys.at(-1)
     assert.equal(deploy.method, 'POST')
+    assert.equal(deploy.fields.source_checkpoint, r.source.checkpointId, 'the publication names the saved source')
+    // Nobody can choose between candidates in a --yes run: exactly one cover and one poster are drawn.
+    assert.deepEqual(run.images.map(i => i.size).sort(), ['1140x1472', '1664x928'])
     assert.deepEqual(Object.keys(deploy.files).sort(), ['README.md', 'analytics.js', 'assets/bg.png', 'game.js', 'index.html', 'levels/1.json', 'style.css'])
     const html = deploy.files['index.html'].toString()
     assert.match(html, /href="style\.css"/)
@@ -196,12 +201,11 @@ describe('deploy --yes --json', () => {
     assert.ok(r.warnings.some(w => w.code === 'adapt.dropped' && /missing\.txt|names no file/.test(w.message)))
 
     assertAllowlistedModels(run)
-    assert.deepEqual(run.images.map(i => i.size).sort(), ['1140x1472', '1140x1472', '1664x928', '1664x928', '1664x928'])
     assert.equal(run.sessions.length, 1)
     assert.equal(run.sessions[0].revoked, true, 'session revoked at the end')
     assert.equal(run.sessions[0].request.client_version.length > 0, true)
     const projects = JSON.parse(fs.readFileSync(path.join(home, '.origingame', 'projects.json'), 'utf8'))
-    assert.deepEqual(Object.values(projects), [{ gameId: r.gameId, slug: r.slug, host: platform.origin }])
+    assert.deepEqual(Object.values(projects), [{ gameId: r.gameId, slug: r.slug, host: platform.origin, repositoryId: r.source.repositoryId }])
 
     // Update: the same project publishes a new version of the same game with expected_revision, uploading nothing unchanged.
     const m2 = mark()
@@ -359,7 +363,7 @@ describe('sandbox mode', () => {
     const cli = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: { ORIGINGAME_API_ORIGIN: relay } })
     const run = since(m)
     assert.equal(cli.code, 0, cli.stderr)
-    const relayed = run.requests.filter(q => q.path.startsWith('/v1/'))
+    const relayed = run.requests.filter(q => q.path === '/v1/chat/completions' || q.path === '/v1/images/generations')
     assert.ok(relayed.length > 0, 'the run called models')
     assert.deepEqual([...new Set(relayed.map(q => q.host))], [new URL(relay).host])
     assert.ok(run.requests.filter(q => q.path.startsWith('/api/deploy')).every(q => q.host === new URL(platform.origin).host), 'publication stays on the Portal origin')
@@ -462,7 +466,7 @@ describe('accounts', () => {
   })
 })
 
-describe('--integrate', () => {
+describe('the origingame/publish worktree', () => {
   function gitProject() {
     const project = copyFixture('plain-html')
     const git = (...args) => execFileSync('git', args, { cwd: project, stdio: 'pipe', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).toString()
@@ -471,33 +475,94 @@ describe('--integrate', () => {
     git('commit', '-qm', 'fixture')
     return { project, git }
   }
+  /** The checkout as the person sees it: every file outside .git, the branch, HEAD, the index and the status. */
+  function checkoutState(project, git) {
+    const files = treeHashExcept(project, '.git')
+    return { files, branch: git('symbolic-ref', 'HEAD').trim(), head: git('rev-parse', 'HEAD').trim(), status: git('status', '--porcelain'), staged: git('diff', '--cached', '--name-only') }
+  }
+  const subjects = (git, base) => git('log', '--format=%s', `${base}..origingame/publish`).split('\n').filter(Boolean)
 
-  test('writes only the approved source edits, then publishes the integrated build', async () => {
+  test('a Git project: adaptations and the score/save wiring are commits on origingame/publish; the checkout is untouched', async () => {
     platform.state.script = scriptFor('integrate')
     const { project, git } = gitProject()
+    // Uncommitted and untracked work is built, never committed.
+    fs.appendFileSync(path.join(project, 'README.md'), '\nlocal change\n')
+    fs.writeFileSync(path.join(project, 'notes.txt'), 'untracked notes\n')
+    const base = git('rev-parse', '--abbrev-ref', 'HEAD').trim()
+    const before = checkoutState(project, git)
     const m = mark()
-    const cli = await runCli(['deploy', '--dir', project, '--integrate', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const cli = await runCli(['deploy', '--dir', project, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
     const run = since(m)
-    report.scenarios.integrate = { exitCode: cli.code, adaptations: cli.result?.adaptations, changed: git('status', '--porcelain').split('\n').filter(Boolean) }
-    assert.equal(cli.code, 0, cli.stderr)
-    assert.deepEqual(git('status', '--porcelain').split('\n').filter(Boolean).sort(), [' M game.js', ' M index.html', '?? og-player.js'])
-    assert.match(fs.readFileSync(path.join(project, 'game.js'), 'utf8'), /leaderboard\.submit/)
+    report.scenarios.worktree = { exitCode: cli.code, workspace: cli.result?.workspace, integration: cli.result?.integration }
+    assert.equal(cli.code, 0, cli.stdout)
+    assert.deepEqual(checkoutState(project, git), before, 'files, branch, HEAD, index and status of the checkout are unchanged')
+
+    const r = cli.result
+    assert.equal(r.workspace.kind, 'worktree')
+    assert.equal(r.workspace.branch, 'origingame/publish')
+    assert.equal(r.workspace.review, 'git diff HEAD...origingame/publish')
+    assert.equal(r.workspace.merge, 'git merge origingame/publish')
+    assert.ok(fs.existsSync(path.join(r.workspace.path, 'index.html')))
+    assert.deepEqual(subjects(git, base), ['origingame: wire leaderboards and cloud saves', 'origingame: adapt for OriginGame'])
+    assert.deepEqual(r.workspace.commits.map(c => c.message), ['origingame: adapt for OriginGame', 'origingame: wire leaderboards and cloud saves'])
+    assert.deepEqual(r.integration, { applied: true, files: ['game.js', 'index.html', 'og-player.js (new)'] })
+    const committed = file => git('show', `origingame/publish:${file}`)
+    assert.match(committed('game.js'), /leaderboard\.submit/)
+    assert.match(committed('index.html'), /<script src="og-player\.js"><\/script>\n {2}<script src="game\.js"><\/script>/, 'relative paths and the player script, on the branch')
+    assert.doesNotMatch(committed('README.md'), /local change/, 'the checkout\'s uncommitted change is not committed')
+    assert.throws(() => committed('notes.txt'), 'untracked files are not committed')
+
     const deploy = run.deploys.at(-1)
-    assert.ok(deploy.files['og-player.js'])
-    assert.match(deploy.files['index.html'].toString(), /<script src="og-player\.js"><\/script>\n {2}<script src="game\.js"><\/script>/)
+    assert.ok(deploy.files['og-player.js'], 'the integrated build is published')
+    assert.match(deploy.files['README.md'].toString(), /local change/, 'built from the checkout as it is')
+    assert.ok(deploy.files['notes.txt'])
     assert.ok(run.chat.filter(c => taskOf(c) === 'integrate').every(c => c.model === 'deepseek-v4-pro'))
     assert.equal(run.sessions[0].revoked, true)
+
+    // A later run reuses the branch and adds no commit when nothing needs changing again.
+    platform.state.script = scriptFor('integrate-again')
+    const again = await runCli(['deploy', '--dir', project, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    assert.equal(again.code, 0, again.stdout)
+    assert.deepEqual(checkoutState(project, git), before)
+    assert.deepEqual(subjects(git, base), ['origingame: wire leaderboards and cloud saves', 'origingame: adapt for OriginGame'])
   })
 
-  test('with --yes and uncommitted changes it refuses to edit the source', async () => {
+  test('an integrated build that does not become ready is replaced by the adaptation-only commit; the publication still succeeds', async () => {
     platform.state.script = scriptFor('integrate')
-    const { project } = gitProject()
-    fs.appendFileSync(path.join(project, 'README.md'), '\nlocal change\n')
-    const beforeHash = treeHash(project)
-    const cli = await runCli(['deploy', '--dir', project, '--integrate', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
-    assert.equal(cli.code, 1)
-    assert.equal(cli.result.error.code, 'adapt_failed')
-    assert.equal(treeHash(project), beforeHash)
+    platform.state.readinessFails = files => Boolean(files['og-player.js'])
+    try {
+      const { project, git } = gitProject()
+      const base = git('rev-parse', '--abbrev-ref', 'HEAD').trim()
+      const before = checkoutState(project, git)
+      const m = mark()
+      const cli = await runCli(['deploy', '--dir', project, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+      const run = since(m)
+      report.scenarios.integrationDropped = { exitCode: cli.code, integration: cli.result?.integration, deploys: run.deploys.length }
+      assert.equal(cli.code, 0, cli.stderr)
+      assert.equal(cli.result.ok, true)
+      assert.equal(cli.result.integration.applied, false)
+      assert.match(cli.result.integration.reason, /did not become ready/)
+      assert.ok(cli.result.warnings.some(w => w.code === 'integration.dropped'))
+      assert.equal(run.deploys.length, 2, 'the integrated attempt, then the adaptation-only build')
+      assert.ok(run.deploys[0].files['og-player.js'])
+      assert.equal(run.deploys[1].files['og-player.js'], undefined)
+      assert.deepEqual(subjects(git, base), ['origingame: adapt for OriginGame'], 'the integration commit is dropped from the branch')
+      assert.deepEqual(checkoutState(project, git), before)
+    } finally {
+      platform.state.readinessFails = undefined
+    }
+  })
+
+  test('--no-integrate and a folder outside Git: the adapted copy is reported, nothing is wired', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const project = copyFixture('plain-html')
+    const before = treeHash(project)
+    const cli = await runCli(['deploy', '--dir', project, '--json', '--no-integrate', '--no-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.equal(treeHash(project), before)
+    assert.deepEqual(cli.result.integration, { applied: false, reason: 'turned off with --no-integrate' })
+    assert.equal(cli.result.workspace.kind, 'copy')
+    assert.match(fs.readFileSync(path.join(cli.result.workspace.path, 'game.js'), 'utf8'), /fetch\('levels\/1\.json'\)/, 'the copy holds the adaptations')
   })
 })
 
@@ -546,9 +611,13 @@ describe('--with-source', () => {
     const expected = ['.gitattributes', '.gitignore', '.origin/wizard-source.json', 'README.md', 'assets/bg.png', 'assets/music.ogg', 'game.js', 'index.html', 'keep.log', 'levels/1.json',
       ...Array.from({ length: 150 }, (_, i) => `levels/gen/${String(i).padStart(3, '0')}.json`), 'notes/.gitignore', 'notes/public.txt', 'style.css'].sort()
     assert.deepEqual([...tree.keys()].sort(), expected)
+    // The uploaded source is the adapted workspace (not a Git repository here: the copy), byte for byte.
+    assert.equal(cli.result.workspace.kind, 'copy')
     for (const file of expected.filter(f => !['.gitattributes', '.origin/wizard-source.json', 'assets/music.ogg'].includes(f))) {
-      assert.equal(sha256(tree.get(file)), sha256(fs.readFileSync(path.join(project, file))), `${file} is committed byte for byte`)
+      assert.equal(sha256(tree.get(file)), sha256(fs.readFileSync(path.join(cli.result.workspace.path, file))), `${file} is committed byte for byte`)
     }
+    assert.match(tree.get('game.js').toString(), /fetch\('levels\/1\.json'\)/, 'with its adaptations')
+    assert.match(fs.readFileSync(path.join(project, 'game.js'), 'utf8'), /fetch\('\/levels\/1\.json'\)/, 'the folder keeps the original')
     const oid = sha256(MUSIC)
     assert.equal(tree.get('assets/music.ogg').toString(), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${MUSIC.length}\n`)
     assert.equal(platform.state.agent.lfs.get(oid).verified, true, 'the LFS object was uploaded and verified')
@@ -600,7 +669,7 @@ describe('--with-source', () => {
     assert.equal(run2.requests.filter(q => q.path.includes('/info/lfs/')).length, 0)
     const tree2 = mainTree(source.repositoryId)
     assert.equal(tree2.has('notes/public.txt'), false)
-    assert.equal(tree2.get('game.js').toString(), fs.readFileSync(path.join(project, 'game.js'), 'utf8'))
+    assert.equal(tree2.get('game.js').toString(), fs.readFileSync(path.join(update.result.workspace.path, 'game.js'), 'utf8'), 'the adapted workspace version')
     assert.notEqual(update.result.source.checkpointId, source.checkpointId)
     assert.equal(run2.deploys.at(-1).fields.source_checkpoint, update.result.source.checkpointId)
     report.scenarios.withSourceUpdate = { exitCode: update.code, source: update.result.source, files: sentFiles }
@@ -650,9 +719,23 @@ describe('--with-source', () => {
     }
   })
 
-  test('--with-source with --source-checkpoint is invalid_arguments', async () => {
-    const cli = await runCli(['deploy', '--json', '--with-source', '--source-checkpoint', 'ckpt_x', '--host', platform.origin], { home: tempDir('home') })
-    assert.equal(cli.code, 1)
-    assert.equal(cli.result.error.code, 'invalid_arguments')
+  test('--no-source saves nothing; the 0.1 flag --with-source is accepted and changes nothing', async () => {
+    const agentRequests = run => run.requests.filter(q => /^\/v1\/(repositories|memberships|checkpoints)|^\/git\//.test(q.path)).length
+    platform.state.script = scriptFor('plain-html')
+    let m = mark()
+    const off = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--no-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    let run = since(m)
+    assert.equal(off.code, 0, off.stderr)
+    assert.equal(off.result.source, null)
+    assert.equal(agentRequests(run), 0, 'with --no-source nothing reaches Agent Service')
+    assert.equal(run.deploys.at(-1).fields.source_checkpoint, undefined)
+
+    platform.state.script = scriptFor('plain-html')
+    m = mark()
+    const legacy = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--with-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    run = since(m)
+    assert.equal(legacy.code, 0, legacy.stderr)
+    assert.ok(legacy.result.source?.checkpointId)
+    assert.ok(agentRequests(run) > 0)
   })
 })

@@ -8,8 +8,10 @@ export interface Options {
   dir: string
   yes: boolean
   json: boolean
+  /** Wire scores and saves into the code on the workspace (default; `--no-integrate` turns it off). */
   integrate: boolean
-  withSource: boolean
+  /** Commit the project source to the person's private repository (default; `--no-source` turns it off). */
+  source: boolean
   game: string | undefined
   title: string | undefined
   unlisted: boolean
@@ -22,34 +24,48 @@ export interface Options {
 
 const COMMANDS = new Set<Command>(['deploy', 'login', 'logout', 'whoami', 'help', 'version'])
 
-export const USAGE = `Usage:
-  npx origingame [deploy] [options]     analyze, adapt and publish the game in this directory
-  npx origingame login                  sign in through the browser
-  npx origingame logout                 revoke this device's sign-in
-  npx origingame whoami                 show the signed-in account
+export const USAGE = `Run \`npx origingame\` in your game folder and answer the questions. Automatic
+publishes with the recommended settings; Manual asks about each one.
 
-Options:
-  --dir <path>               project directory (default: current directory)
-  --yes                      accept the defaults; never prompt
+What a run does: finds the game, signs you in, adapts it to OriginGame and wires
+leaderboards and cloud saves on a branch origingame/publish in a separate Git
+worktree (or a copy when the folder is not in Git), never in your folder; saves
+the source to your private repository; writes the listing, cover and poster;
+publishes; and tells you how to review and merge the branch.
+
+Commands:
+  npx origingame [deploy]     publish the game in this folder
+  npx origingame login        sign in through the browser
+  npx origingame logout       revoke this device's sign-in
+  npx origingame whoami       show the signed-in account
+
+Options for scripts and agents (they take the Automatic choices without asking):
+  --yes                      take every default; never prompt
   --json                     print one JSON result line on stdout (implies --yes); progress goes to stderr
-  --integrate                also wire scores and saves into your source (shows a diff first)
-  --with-source              also commit your source (as Git tracks it) to a private OriginGame repository
-  --game <id>                update this game instead of the one remembered for the directory
+  --dir <path>               game folder (default: current directory)
+  --no-source                do not save the source to your private repository
+  --no-integrate             do not wire leaderboards and cloud saves into the code
+  --game <id>                update this game instead of the one remembered for the folder
   --title <title>            game title
-  --unlisted                 publish without listing the game in the catalog
+  --unlisted                 keep the game out of the public catalog (anyone with the link can play)
+  --prebuilt <dir>           skip the build and publish this folder
   --host <origin>            platform origin (default: https://origingame.ai, or OG_HOST)
   --no-telemetry             disable anonymous usage events
-  --prebuilt <dir>           skip the build and publish this directory
   --credentials-file <path>  sandbox mode: run with a session handed over in this file (deleted on read)
-  --source-checkpoint <id>   record the source checkpoint this build came from
+  --source-checkpoint <id>   record the source checkpoint this build came from (sandbox mode)
+  --with-source, --integrate deprecated: both are the default now
   -h, --help                 show this help
   -v, --version              show the version`
 
 export function parseOptions(argv: string[]): Options {
   let telemetry = true
+  let source = true
+  let integrate = true
   const rest: string[] = []
   for (const arg of argv) {
     if (arg === '--no-telemetry') telemetry = false
+    else if (arg === '--no-source') source = false
+    else if (arg === '--no-integrate') integrate = false
     else rest.push(arg)
   }
   let parsed
@@ -91,8 +107,11 @@ export function parseOptions(argv: string[]): Options {
     dir: values.dir ?? process.cwd(),
     yes: values.yes === true || json,
     json,
-    integrate: values.integrate === true,
-    withSource: values['with-source'] === true,
+    // Wiring scores and saves is the default (it lands on the workspace branch); `--integrate` (0.1.x) changes nothing.
+    integrate,
+    // `--with-source` (0.1.x) is accepted and changes nothing: the source is saved by default.
+    // A sandbox run already has its source in Agent Service (`--source-checkpoint`).
+    source: source && !values['credentials-file'] && !values['source-checkpoint'],
     game: values.game,
     title: values.title,
     unlisted: values.unlisted === true,
@@ -109,9 +128,6 @@ export function parseOptions(argv: string[]): Options {
     throw new WizardError('invalid_arguments', '--source-checkpoint must match [a-zA-Z0-9_-]{1,200}')
   }
   if (options.title !== undefined && !options.title.trim()) throw new WizardError('invalid_arguments', '--title must not be empty')
-  if (options.withSource && options.sourceCheckpoint) {
-    throw new WizardError('invalid_arguments', '--with-source uploads the source and records its checkpoint; do not combine it with --source-checkpoint')
-  }
   if (options.credentialsFile && !options.sourceCheckpoint) {
     throw new WizardError('invalid_arguments', '--credentials-file (sandbox mode) requires --source-checkpoint')
   }

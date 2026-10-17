@@ -412,6 +412,11 @@ export async function startPlatform({ rulesDir }) {
     if (url.pathname.startsWith('/api/deploy')) {
       const owner = portalOwner(req)
       if (!owner) return json(res, 401, { error: 'invalid api key' })
+      // The account's own games, newest first (server/src/routes/deploy.ts `GET /api/deploy/mine`).
+      if (route === 'GET /api/deploy/mine') {
+        const games = [...state.games.values()].filter(g => g.owner === owner).reverse()
+        return json(res, 200, { games: games.map(g => ({ id: g.id, slug: g.slug, title: g.fields.title, version: g.version, unlisted: g.unlisted, current_release_id: g.currentReleaseId })) })
+      }
       if (route === 'POST /api/deploy/source-uploads') {
         const { files: entries } = JSON.parse(raw.toString())
         const sorted = [...entries].sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
@@ -470,11 +475,11 @@ export async function startPlatform({ rulesDir }) {
           if (!blobs.cover) return json(res, 400, { error: 'cover is required' })
           if (!portalAccepts('cover', blobs.cover)) return json(res, 400, { error: 'cover must be a 16:9 image at least 640×360' })
           if (blobs.poster && !portalAccepts('poster', blobs.poster)) return json(res, 400, { error: 'poster must be a 3:4 image at least 600×800' })
-          if (state.readiness422) return json(res, 422, { error: 'readiness_failed: the game did not become ready in the Player because it said hello but never sent ready. Nothing was published.', readiness: { status: 'timeout', protocol: 2, consoleErrors: { count: 0, samples: [] }, failedResources: { count: 0, samples: [] } } })
+          if (state.readiness422 || state.readinessFails?.(deploy.files)) return json(res, 422, { error: 'readiness_failed: the game did not become ready in the Player because it said hello but never sent ready. Nothing was published.', readiness: { status: 'timeout', protocol: 2, consoleErrors: { count: 0, samples: [] }, failedResources: { count: 0, samples: [] } } })
           const id = randomBytes(5).toString('hex')
           const slug = fields.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
           const releaseId = `release_${id}_v1`
-          const game = { id, slug, version: 1, revision: 3, currentReleaseId: releaseId, releases: [{ releaseId, version: 1 }], fields }
+          const game = { id, slug, owner, unlisted: fields.unlisted === '1', version: 1, revision: 3, currentReleaseId: releaseId, releases: [{ releaseId, version: 1 }], fields }
           state.games.set(id, game)
           linkSource(fields.source_checkpoint, id, releaseId)
           return json(res, 201, { gameId: id, slug, version: 1, releaseId, traceId: fields.operation_id, warnings: [], playUrl: `${state.origin}/play/${id}/`, portalUrl: `${state.origin}/g/${slug}`, operationId: fields.operation_id })
@@ -483,7 +488,9 @@ export async function startPlatform({ rulesDir }) {
         if (!game) return json(res, 404, { error: 'not found' })
         if (fields.expected_revision === undefined) return json(res, 428, { error: 'expected_revision required; read release history before updating' })
         if (Number(fields.expected_revision) !== game.revision) return json(res, 409, { error: 'game changed; refresh release history and review update', revision: game.revision })
-        if (state.readiness422) return json(res, 422, { error: 'readiness_failed: it crashed after ready (TypeError). Nothing was published.', readiness: { status: 'crashed' } })
+        if (state.readiness422 || state.readinessFails?.(deploy.files)) return json(res, 422, { error: 'readiness_failed: it crashed after ready (TypeError). Nothing was published.', readiness: { status: 'crashed' } })
+        // Portal keeps the visibility unless the form names it (formBoolean(body.unlisted, current.unlisted)).
+        if (fields.unlisted !== undefined) game.unlisted = fields.unlisted === '1'
         game.version++
         game.revision++
         const releaseId = `release_${game.id}_v${game.version}`

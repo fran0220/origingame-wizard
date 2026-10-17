@@ -26,7 +26,7 @@ export const PORTAL_LIMITS = {
 } as const
 
 /**
- * `--with-source` limits. Agent Service takes at most 64 files and 512 KiB of
+ * Source upload limits. Agent Service takes at most 64 files and 512 KiB of
  * content per server-side commit (agent-service docs/facts.md); files above
  * `lfsThreshold` go through Git LFS, which shares the account's 2 GiB quota.
  */

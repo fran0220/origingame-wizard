@@ -47,6 +47,17 @@ export function treeHash(dir) {
   return hash.digest('hex')
 }
 
+/** treeHash, leaving out one top-level entry (a checkout's `.git`). */
+export function treeHashExcept(dir, skip) {
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'og-wizard-hash-'))
+  try {
+    for (const name of fs.readdirSync(dir)) if (name !== skip) fs.cpSync(path.join(dir, name), path.join(copy, name), { recursive: true, verbatimSymlinks: true, preserveTimestamps: true })
+    return treeHash(copy)
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true })
+  }
+}
+
 export const sha256 = data => createHash('sha256').update(data).digest('hex')
 
 /** Runs the built CLI as a subprocess; resolves with its exit code, stdout, stderr and the parsed JSON line. */
@@ -76,4 +87,28 @@ export function signedInHome(host, token) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify({ host, access_token: token, device_id: 7, account: { id: 42, username: 'maker', display_name: 'Maker' } }), { mode: 0o600 })
   return home
+}
+
+export const KEY = { enter: '\r', down: '\x1b[B', up: '\x1b[A', right: '\x1b[C', left: '\x1b[D' }
+
+/**
+ * Runs the built CLI in a real pseudo-terminal (test/pty-driver.py) and
+ * answers its prompts in order: each step waits for `expect` (a regex source
+ * matched against the output without ANSI codes) and then types `send`.
+ * Resolves with the exit code, the transcript and how many steps were answered.
+ */
+export function runPty(args, steps, { home, env = {}, cwd = ROOT, timeoutSeconds = 90 } = {}) {
+  const spec = path.join(tempDir('pty'), 'spec.json')
+  const childEnv = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, TERM: 'xterm-256color', ORIGINGAME_NO_BROWSER: '1', ORIGINGAME_READINESS_WAIT_SECONDS: '20', npm_config_update_notifier: 'false', ...env }
+  fs.writeFileSync(spec, JSON.stringify({ argv: [process.execPath, CLI, ...args], env: childEnv, cwd, steps, timeoutSeconds }))
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', ['-I', path.join(ROOT, 'test', 'pty-driver.py'), spec], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', d => { stdout += d })
+    child.stderr.on('data', d => { stderr += d })
+    child.on('close', () => {
+      try { resolve(JSON.parse(stdout)) } catch { reject(new Error(`pty driver failed: ${stderr || stdout}`)) }
+    })
+  })
 }

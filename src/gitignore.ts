@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * `.gitignore` semantics for the source upload (`--with-source`): every
+ * `.gitignore` semantics for the source upload: every
  * directory's `.gitignore` applies to the entries below it; the last matching
  * pattern wins and `!` re-includes; a trailing `/` matches directories only; a
  * pattern with a `/` before its end is anchored to its file's directory,

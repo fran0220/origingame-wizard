@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { applyEdits, inside, integrationRefusal, unifiedDiff } from './adapt.js'
@@ -10,33 +9,18 @@ import type { Rules } from './rules.js'
 import { INTEGRATE_SCHEMA, type Integration } from './tasks.js'
 import type { Ui } from './ui.js'
 
-function gitState(dir: string): 'clean' | 'dirty' | 'none' {
-  try {
-    const out = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], { cwd: dir, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-    return out.trim() ? 'dirty' : 'clean'
-  } catch {
-    return 'none'
-  }
-}
-
 /**
- * `--integrate`: the only step that writes to the project. The model proposes
- * exact edits that wire scores and saves to Player protocol 2 `call`s; the
- * person sees the diff first, and the working tree must be clean in git (or
- * the person confirms) so every change is reviewable and revertible.
+ * Score and save integration: the model proposes exact edits that wire scores
+ * and saves to Player protocol 2 `call`s, applied to the run's workspace (the
+ * `origingame/publish` worktree or a copy), never the person's checkout. The
+ * diff is shown; `undo` restores the workspace files it changed.
  */
-export async function integrate(client: ModelClient, rules: Rules, ui: Ui, input: { projectDir: string; stageDir: string; detection: Detection; digest: Digest; reader: ContextReader }): Promise<{ applied: string[]; skipped: string[]; summary: string } | null> {
+export interface IntegrationResult { applied: string[]; skipped: string[]; summary: string; undo: Array<{ file: string; before: string | null }> }
+
+export async function integrate(client: ModelClient, rules: Rules, ui: Ui, input: { projectDir: string; stageDir: string; detection: Detection; digest: Digest; reader: ContextReader; where: string }): Promise<IntegrationResult | { refused: string }> {
   const { projectDir, detection } = input
   if (detection.engine === 'godot' || detection.kind === 'godot-export' || detection.kind === 'prebuilt') {
-    ui.warn('--integrate needs web source code (HTML or JavaScript/TypeScript); this project has none, so nothing is wired.')
-    return null
-  }
-  const state = gitState(projectDir)
-  if (state !== 'clean') {
-    const what = state === 'none' ? 'is not a git repository' : 'has uncommitted changes'
-    if (!ui.interactive) throw new WizardError('adapt_failed', `--integrate edits your source, and ${projectDir} ${what}; commit or stash first (with --yes a clean git tree is required)`)
-    const go = await ui.confirm(`This project ${what}, so the edits will be hard to review or undo. Continue?`, false)
-    if (!go) return null
+    return { refused: 'the project has no web source code (HTML or JavaScript/TypeScript) to wire' }
   }
   const s = ui.spinner('Planning the score and save integration')
   const plan = await client.json<Integration>({
@@ -72,26 +56,29 @@ export async function integrate(client: ModelClient, rules: Rules, ui: Ui, input
       return true
     })
     if (!previews.length && !created.length) {
-      ui.warn(`No integration edit could be applied${result.skipped.length ? `: ${result.skipped.join('; ')}` : ''}`)
-      return { applied: [], skipped: result.skipped, summary: plan.summary }
+      return { refused: `no integration edit could be applied${result.skipped.length ? `: ${result.skipped.join('; ')}` : ''}` }
     }
-    ui.note('Integration diff (your source)', [
+    ui.note(`Score and save integration (${input.where})`, [
       plan.summary,
       ...previews.map(p => unifiedDiff(p.file, p.before, p.after)),
       ...created.map(f => `+++ new file ${f.path}\n${f.content.split('\n').slice(0, 40).map(l => `+${l}`).join('\n')}`),
     ].join('\n\n'))
     if (result.skipped.length) ui.warn(`Skipped: ${result.skipped.join('; ')}`)
-    const ok = await ui.confirm('Write these changes to your project?', true)
-    if (!ok) return null
-    for (const p of previews) fs.writeFileSync(inside(projectDir, p.file)!, p.after)
+    const undo: IntegrationResult['undo'] = []
+    for (const p of previews) {
+      const target = inside(projectDir, p.file)!
+      undo.push({ file: target, before: p.before })
+      fs.writeFileSync(target, p.after)
+    }
     for (const f of created) {
       const target = inside(projectDir, f.path)!
+      undo.push({ file: target, before: null })
       fs.mkdirSync(path.dirname(target), { recursive: true })
       fs.writeFileSync(target, f.content)
     }
     const applied = [...previews.map(p => p.file), ...created.map(f => `${f.path} (new)`)]
     ui.success(`Integrated in ${applied.join(', ')}`)
-    return { applied, skipped: result.skipped, summary: plan.summary }
+    return { applied, skipped: result.skipped, summary: plan.summary, undo }
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
   }

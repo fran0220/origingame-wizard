@@ -10,6 +10,9 @@ import type { Ui } from './ui.js'
  * Portal's publication API (contracts §5): content-addressed source uploads,
  * then one multipart create (POST /api/deploy) or update (PUT /api/deploy/:id).
  */
+/** One of the account's games as `GET /api/deploy/mine` lists it. */
+export interface OwnGame { id: string; title: string; version: number; unlisted: boolean }
+
 export class Portal {
   constructor(readonly host: string, private readonly auth: PortalAuth) {}
 
@@ -77,6 +80,19 @@ export class Portal {
     if (!finalized.ok) { s.fail('Upload failed'); throw new WizardError('upload_failed', `could not finalize the upload: ${describe(finalized)}`) }
     s.stop(`Uploaded ${missing.length} file${missing.length === 1 ? '' : 's'}, reused ${manifest.entries.length - missing.length}`)
     return { sourceUploadId: id, uploaded: missing.length, reused: manifest.entries.length - missing.length }
+  }
+
+  /**
+   * The account's own games (`GET /api/deploy/mine`, newest first), or null
+   * when Portal does not answer them to this credential.
+   */
+  async mine(): Promise<OwnGame[] | null> {
+    const response = await this.call('/api/deploy/mine', {}, 'publish_failed').catch(() => null)
+    const games = response?.ok && Array.isArray(response.json?.games) ? response.json.games : null
+    if (!games) return null
+    return games.flatMap((g: Record<string, unknown>) => (typeof g.id === 'string' && typeof g.title === 'string'
+      ? [{ id: g.id, title: g.title, version: Number(g.version) || 0, unlisted: g.unlisted === true || g.unlisted === 1 }]
+      : []))
   }
 
   async releases(gameId: string): Promise<HttpResponse> {

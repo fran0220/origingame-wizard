@@ -25,6 +25,8 @@ export interface Ui {
   note(title: string, body: string): void
   spinner(message: string): Spinner
   confirm(message: string, initial: boolean): Promise<boolean>
+  /** A question no mode may skip in a terminal (the data notice, a possible secret): asked whenever a person can answer. */
+  confirmRequired(message: string, initial: boolean): Promise<boolean>
   multiselect<T>(message: string, choices: Choice<T>[], initial: T[]): Promise<T[]>
   select<T>(message: string, choices: Choice<T>[], initial: T): Promise<T>
   text(message: string, initial: string, validate?: (value: string) => string | undefined): Promise<string>
@@ -52,6 +54,7 @@ class JsonUi implements Ui {
     return { stop: m => m && this.success(m), fail: m => m && this.error(m), update: () => {} }
   }
   async confirm(_message: string, initial: boolean) { return initial }
+  async confirmRequired(_message: string, initial: boolean) { return initial }
   async multiselect<T>(_message: string, _choices: Choice<T>[], initial: T[]) { return initial }
   async select<T>(_message: string, _choices: Choice<T>[], initial: T) { return initial }
   async text(_message: string, initial: string) { return initial }
@@ -77,6 +80,7 @@ class ClackUi implements Ui {
     if (!this.interactive) return initial
     return cancelled(await clack.confirm({ message, initialValue: initial }))
   }
+  confirmRequired(message: string, initial: boolean) { return this.confirm(message, initial) }
   async multiselect<T>(message: string, choices: Choice<T>[], initial: T[]) {
     if (!this.interactive || !choices.length) return initial
     const options = choices.map(c => ({ value: c.value, label: c.label, ...(c.hint ? { hint: c.hint } : {}) })) as Parameters<typeof clack.multiselect<T>>[0]['options']
@@ -91,6 +95,25 @@ class ClackUi implements Ui {
     if (!this.interactive) return initial
     return cancelled(await clack.text({ message, initialValue: initial, ...(validate ? { validate: (v: string | undefined) => validate(v ?? '') } : {}) }))
   }
+}
+
+/**
+ * Automatic mode in a terminal: the same output, every setting takes its
+ * recommended default without a question; only `confirmRequired` still asks.
+ */
+export function automatic(ui: Ui): Ui {
+  const quiet: Ui = {
+    interactive: false,
+    json: ui.json,
+    intro: m => ui.intro(m), outro: m => ui.outro(m), info: m => ui.info(m), step: m => ui.step(m), success: m => ui.success(m),
+    warn: m => ui.warn(m), error: m => ui.error(m), note: (t, b) => ui.note(t, b), spinner: m => ui.spinner(m),
+    confirm: async (_m, initial) => initial,
+    confirmRequired: (m, initial) => ui.confirmRequired(m, initial),
+    multiselect: async (_m, _c, initial) => initial,
+    select: async (_m, _c, initial) => initial,
+    text: async (_m, initial) => initial,
+  }
+  return quiet
 }
 
 export function createUi(options: { json: boolean; yes: boolean }): Ui {

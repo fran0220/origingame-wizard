@@ -49,7 +49,9 @@ async function main(): Promise<number> {
       case 'deploy': {
         const result = await deploy(options, ui, telemetry)
         emit(options, result)
-        if (!options.json) ui.outro(`Play it: ${result.playUrl}`)
+        if (!options.json) ui.outro(ui.interactive
+          ? `Done. To publish an update later, run npx origingame in this folder again. Manage the game: ${result.portalUrl}`
+          : `Play it: ${result.playUrl}`)
         return 0
       }
       default:

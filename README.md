@@ -1,16 +1,32 @@
 # Origin Wizard
 
-Publish your web game to [OriginGame](https://origingame.ai) with one command.
+Publish your web game to [OriginGame](https://origingame.ai). In your game's folder:
 
 ```sh
-npx origingame deploy
+npx origingame
 ```
 
-The Wizard looks at the game in the current directory, builds it if it needs
-building, adapts a **copy** of the build so it runs inside the OriginGame
-Player, writes the store listing, draws a cover and a poster, and publishes it.
-You get a play link at the end. The model and image costs are paid by
-OriginGame, not by you.
+and answer the questions. The first one is how to publish:
+
+- **Automatic** (the default, press Enter): publish with the recommended
+  settings. The Wizard shows the plan in one line, then asks nothing more except
+  what nobody may skip: the browser sign-in when you are not signed in, the
+  data notice on your first run, and a confirmation when a file in the build
+  looks like a credential.
+- **Manual**: choose each setting: the folder and what to publish from it, the
+  account, a new game or which of your games to update, whether to save the
+  source, which adaptations to apply, whether to wire leaderboards and cloud
+  saves, the title, genre and description, the cover and poster, and who can
+  find the game; then a review before anything is uploaded.
+
+The Wizard finds the game, builds it if it needs building, adapts it so it runs
+inside the OriginGame Player, wires leaderboards and cloud saves, saves your
+source to a private repository of yours, writes the store listing, draws a
+cover and a poster, and publishes it. **Your folder is never changed**: in a Git
+repository every change is a commit on a branch `origingame/publish` in a
+separate worktree, which you review and merge when you want; outside Git the
+changes stay in a copy. The model and image costs are paid by OriginGame, not
+by you.
 
 It works with:
 
@@ -28,12 +44,13 @@ It works with:
 2. **Sign in** once in your browser (device authorization; the device appears on your account's Devices page and can be revoked there). The device credential is stored in `~/.origingame/credentials.json` with mode `0600`.
 3. **Session**: each run gets a short platform-funded Wizard session (at most 30 minutes, a fixed model allowlist and a per-run budget). It lives only in memory and is revoked when the run ends, also when it fails or you press Ctrl-C.
 4. **Consent**: the first run shows exactly what will be sent and asks you to agree (`--yes` counts as agreeing).
-5. **Build** with your own build command, in a scratch copy under `~/.origingame/stage/`. Your project directory is never written.
-6. **Analyze**: DeepSeek reads a bounded digest of the build and proposes an adaptation plan. Deterministic checks run first and their findings cannot be overridden by the model.
-7. **Confirm** each item (or take the recommended set with `--yes`).
-8. **Adapt** the staged copy only: root-absolute paths made relative, cross-origin isolation declared for threaded WebAssembly (`origingame.runtime.json`), a Godot export's service worker turned off, a stale OriginGame entry config removed, and small exact code edits you approved.
-9. **Artwork**: DeepSeek writes prompts, Qwen Image Turbo draws 3 cover (16:9) and 2 poster (3:4) candidates from text only (no screenshots), each cropped and scaled locally to 1280×720 and 1080×1440. You pick in the terminal while a local preview page shows them.
-10. **Publish**: files are uploaded content-addressed (an update uploads only changed files), then the game is created or updated, and the Wizard waits for the readiness check and prints the play link.
+5. **Workspace**: in a Git repository, a worktree of the repository on the branch `origingame/publish` under `~/.origingame/worktrees/`, created from your HEAD and advanced to it on later runs (if your latest commit does not merge cleanly, the branch starts again from it). Your uncommitted changes and untracked files are copied in so the build matches what you see, but they are never committed. Your checkout, index and current branch are never touched. Outside Git, a copy under `~/.origingame/stage/`.
+6. **Build** with your own build command, from the workspace.
+7. **Analyze**: DeepSeek reads a bounded digest of the build and proposes an adaptation plan. Deterministic checks run first and their findings cannot be overridden by the model.
+8. **Adapt** (always): root-absolute paths made relative, cross-origin isolation declared for threaded WebAssembly (`origingame.runtime.json`), a Godot export's service worker turned off, a stale OriginGame entry config removed, and small exact code edits. Automatic takes the required and recommended items; Manual lets you leave out the optional ones. Where the published files are your own files (HTML games, exports in the tree) the changes are committed as `origingame: adapt for OriginGame`; for built projects they apply to the build output.
+9. **Integrate** (by default; `--no-integrate` or Manual's No turns it off): DeepSeek wires leaderboards and cloud saves to the Player protocol in the workspace's source, shows the diff and commits it as `origingame: wire leaderboards and cloud saves`. If the integrated build does not become ready in the Player, the Wizard drops that commit, publishes the adaptation-only build instead and reports why; the publication never fails because of the integration.
+10. **Artwork**: DeepSeek writes prompts and Qwen Image Turbo draws from text only (no screenshots), each image cropped and scaled locally to 1280×720 (cover, 16:9) and 1080×1440 (poster, 3:4). In Manual, 3 cover and 2 poster candidates to pick from in the terminal, with a local preview page; Automatic and `--yes` draw one of each.
+11. **Publish**: the source goes to your private repository (below), the build is uploaded content-addressed (an update uploads only changed files), the game is created or updated, and the Wizard waits for the readiness check, then prints the play link and how to review (`git diff HEAD...origingame/publish`) and keep (`git merge origingame/publish`) the branch.
 
 The next run in the same directory updates the same game: its id is remembered in
 `~/.origingame/projects.json`, the current release revision is read, and the
@@ -55,17 +72,18 @@ Never sent:
 
 - credential files: `.env*`, `*.pem`, `*.key`, `*.p12`, keystores, `id_*` SSH keys, `.npmrc`, `.netrc`, `credentials.*`, `secrets.*`, service account files. They are also never uploaded;
 - any file with a line that looks like a credential (cloud and API key formats, private key blocks, `api_key = "…"` style assignments). If such a file is part of your game, it is still published (removing it could break the game) and the run warns you, because a key in a public game is public;
-- your source code is not uploaded to OriginGame unless you pass `--with-source` (below); otherwise only the built game is published.
+- the source uploaded to your private repository is not sent to any model beyond the digest above.
 
-## Your source in a private repository (`--with-source`)
+## Your source in a private repository
 
-With `--with-source`, the run also commits your project's source to a private
-repository on OriginGame owned by your account and links it to the published
-game, so you can continue the game with the Origin agent. Nothing is uploaded
-without the flag; in a terminal the Wizard shows what it would upload and asks
-(the default is no); with `--yes` or `--json` the flag itself is the consent.
+By default the run also commits your project's source to a private repository
+on OriginGame owned by your account and links it to the published game, so you
+can continue the game with the Origin agent. Manual asks first (the default is
+yes); Automatic and `--yes` save it; `--no-source` turns it off.
 
-- What is uploaded is what Git would track: every `.gitignore` in the project
+- What is uploaded is the workspace: the `origingame/publish` branch's tree
+  (or the copy) with the files from your checkout that the rules below allow.
+- Within it, what Git would track: every `.gitignore` in the project
   applies, and `node_modules`, `.git` and engine caches are skipped. Credential
   files and files with a credential-like line are left out and listed; symbolic
   links are not followed.
@@ -102,28 +120,30 @@ server enforces.
 ## Usage
 
 ```sh
-npx origingame deploy                     # the default command; `npx origingame` alone does the same
-npx origingame deploy --dir ./my-game
-npx origingame deploy --title "Star Catcher" --unlisted
-npx origingame deploy --integrate         # also wire scores and saves into your source (diff first)
+npx origingame                            # answer the questions (Automatic or Manual)
+npx origingame --dir ./my-game
 npx origingame login | logout | whoami
 ```
 
+Options are for scripts and agents; a person never needs them. They take the
+Automatic choices without asking.
+
 | Flag | Meaning |
 |---|---|
-| `--dir <path>` | project directory (default: the current directory) |
-| `--yes` | accept the defaults and never prompt |
+| `--yes` | take every default and never prompt |
 | `--json` | print exactly one JSON line on stdout; progress goes to stderr. Implies `--yes` |
-| `--integrate` | wire scores and saves to the Player protocol in your source. Shows a diff and asks first; with `--yes` the git tree must be clean. HTML and JavaScript projects only |
-| `--with-source` | also commit your source (as Git tracks it) to a private OriginGame repository linked to the game (see above) |
-| `--game <id>` | update this game instead of the one remembered for the directory |
+| `--dir <path>` | game folder (default: the current directory) |
+| `--no-source` | do not save the source to your private repository |
+| `--no-integrate` | do not wire leaderboards and cloud saves |
+| `--game <id>` | update this game instead of the one remembered for the folder |
 | `--title <title>` | the game's title |
-| `--unlisted` | publish without listing the game in the catalog |
+| `--unlisted` | keep the game out of the public catalog (anyone with the link can play) |
+| `--prebuilt <dir>` | skip the build and publish this folder |
 | `--host <origin>` | platform origin (default `https://origingame.ai`, or `OG_HOST`) |
-| `--prebuilt <dir>` | skip the build and publish this directory |
 | `--no-telemetry` | disable usage events (see Privacy) |
 | `--credentials-file <path>` | sandbox mode, for the platform's own agent threads (below) |
 | `--source-checkpoint <id>` | record the source checkpoint the build came from |
+| `--with-source`, `--integrate` | accepted for 0.1 callers; both are the default now |
 
 Environment: `OG_HOST` (platform origin), `OG_API_KEY` (an `og-` account key used
 instead of the stored sign-in, never written to disk), `GODOT` (path to the
@@ -131,15 +151,15 @@ Godot editor), `CI` (fail instead of starting a browser sign-in),
 `ORIGINGAME_NO_BROWSER=1` (print the sign-in link without opening a browser),
 `ORIGINGAME_READINESS_WAIT_SECONDS` (how long to wait for the readiness check,
 default 60), `ORIGINGAME_API_ORIGIN` (the AI Gateway relay for model calls, default
-`https://api.<host>`), `ORIGINGAME_AGENT_ORIGIN` (the Agent Service origin for
-`--with-source`; default `https://agent.<host>`).
+`https://api.<host>`), `ORIGINGAME_AGENT_ORIGIN` (the Agent Service origin for the source upload;
+default `https://agent.<host>`).
 
 ### In coding agents and CI
 
 Claude Code, Codex, Cursor and other agents run the same command in their terminal:
 
 ```sh
-npx origingame deploy --yes --json
+npx origingame --yes --json
 ```
 
 stdout is a single JSON line:
@@ -148,7 +168,10 @@ stdout is a single JSON line:
 {"ok":true,"action":"created","gameId":"…","slug":"…","version":1,"releaseId":"…","playUrl":"…","portalUrl":"…",
  "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","stageSha256":"…","rulesVersion":"…","adaptations":["…"],
  "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":3,"imageCalls":5,"models":["…"]},
- "source":null}
+ "source":{"repositoryId":"…","checkpointId":"…"},
+ "workspace":{"kind":"worktree","path":"…/.origingame/worktrees/…","branch":"origingame/publish","base":"…",
+  "commits":[{"sha":"…","message":"origingame: adapt for OriginGame"}],"review":"git diff HEAD...origingame/publish","merge":"git merge origingame/publish"},
+ "integration":{"applied":true,"files":["game.js","og-player.js (new)"]}}
 {"ok":false,"error":{"code":"build_failed","message":"…"}}
 ```
 
@@ -157,8 +180,11 @@ Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`
 `readiness_failed` (with `error.readiness`), `rules_unavailable`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
-With `--with-source`, `source` is `{repositoryId, checkpointId, commit,
-createdRepository, files, bytes, committed, deleted, lfsObjects, withheld}`.
+`source` is `{repositoryId, checkpointId, commit, createdRepository, files, bytes,
+committed, deleted, lfsObjects, withheld}`, or `null` with `--no-source`.
+`workspace` is the worktree (as above) or `{"kind":"copy","path":"…"}` outside Git.
+`integration` is `{applied: false, reason}` when it was turned off, impossible
+(no web source) or dropped after a failed readiness check.
 
 If the agent's machine is not signed in, the command prints a sign-in link and
 code on stderr and waits for you to approve it in the browser. In CI, sign in
@@ -168,7 +194,8 @@ beforehand or set `OG_API_KEY`.
 
 The platform's agent threads publish through this same command inside their
 sandbox: `origingame deploy --yes --json --prebuilt <dir> --credentials-file <file>
---source-checkpoint <id> [--game <id>]`. The file holds a Wizard session and a
+--source-checkpoint <id> [--game <id>]`; its source is already in Agent Service, so
+nothing is uploaded from the sandbox but the build. The file holds a Wizard session and a
 short-lived publish delegation; the Wizard reads it, deletes it at once, never
 reads or writes `~/.origingame/credentials.json`, and sends Portal the
 delegation with the repository header.

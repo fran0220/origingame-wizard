@@ -130,7 +130,7 @@ export function applyItems(site: string, items: PlanItem[], entry: string): Appl
   return result
 }
 
-/** Which project files `--integrate` may edit, as a refusal reason or null. */
+/** Which project files the score and save integration may edit, as a refusal reason or null. */
 export function integrationRefusal(relative: string): string | null {
   const normalized = path.posix.normalize(relative.replace(/\\/g, '/'))
   if (normalized.split('/').some(p => ['node_modules', '.git', 'dist', 'build', '.godot'].includes(p))) return 'generated or tooling directory'

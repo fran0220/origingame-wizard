@@ -8,7 +8,7 @@ export function homeDir(): string {
   return path.join(os.homedir(), '.origingame')
 }
 
-function ensureHome(): string {
+export function ensureHome(): string {
   const dir = homeDir()
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   return dir
@@ -61,7 +61,7 @@ export function deleteCredentials(): boolean {
   }
 }
 
-/** `repositoryId`: the private source repository `--with-source` committed to. */
+/** `repositoryId`: the private source repository the source upload committed to. */
 export interface ProjectMemory { gameId: string; slug: string; host: string; repositoryId?: string }
 
 const projectsFile = () => path.join(homeDir(), 'projects.json')
@@ -91,7 +91,7 @@ export function forgetGame(projectDir: string): void {
 interface Settings { consent?: { version: number; at: string } }
 const settingsFile = () => path.join(homeDir(), 'settings.json')
 /** Bump when what is sent to the model changes in a way the person must agree to again. */
-export const CONSENT_VERSION = 1
+export const CONSENT_VERSION = 2
 
 export function hasConsented(): boolean {
   return (readJson<Settings>(settingsFile())?.consent?.version ?? 0) >= CONSENT_VERSION

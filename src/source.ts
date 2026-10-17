@@ -10,7 +10,7 @@ import { findSecrets, isSecretFile } from './secrets.js'
 import type { Ui } from './ui.js'
 
 /**
- * `--with-source` (contracts §9): the project's source, as Git would track it,
+ * The source upload (contracts §9, on by default): the project's source, as Git would track it,
  * committed to a private Agent Service repository owned by the signed-in
  * account and pinned as a checkpoint that the publication then names in
  * `source_checkpoint`, so Portal links the release to it and the person can
@@ -55,7 +55,7 @@ function validPath(file: string): boolean {
   return file.split('/').every(s => s && s !== '.' && s !== '..' && s.toLowerCase() !== '.git' && s.toLowerCase() !== '.gitmodules' && VALID_SEGMENT.test(s))
 }
 
-/** What `--with-source` would upload, checked against the limits before anything is sent. */
+/** What the source upload would send, checked against the limits before anything is sent. */
 export function planSource(projectDir: string): SourcePlan {
   const walked = walkTracked(projectDir, SKIP)
   const files: SourceFile[] = []
@@ -72,7 +72,7 @@ export function planSource(projectDir: string): SourcePlan {
       if (hit) { withheld.push({ path: entry.path, reason: `line ${hit.line} looks like a ${hit.kind}` }); continue }
     }
     if (entry.size > SOURCE_LIMITS.maxFileBytes) {
-      throw new WizardError('source_failed', `${entry.path} is ${(entry.size / 1048576).toFixed(0)} MiB; source files are limited to ${SOURCE_LIMITS.maxFileBytes / 1048576} MiB (add it to .gitignore or leave out --with-source)`)
+      throw new WizardError('source_failed', `${entry.path} is ${(entry.size / 1048576).toFixed(0)} MiB; source files are limited to ${SOURCE_LIMITS.maxFileBytes / 1048576} MiB (add it to .gitignore or pass --no-source)`)
     }
     files.push(entry)
     totalBytes += entry.size
@@ -83,7 +83,7 @@ export function planSource(projectDir: string): SourcePlan {
   return { root: projectDir, files, withheld, totalBytes }
 }
 
-/** Agent Service's public origin: `ORIGINGAME_AGENT_ORIGIN`, else `https://agent.<host>`. */
+/** Agent Service's public origin: `ORIGINGAME_AGENT_ORIGIN`, else `https://agent.<host>` (a loopback host serves it itself). */
 export function agentOrigin(host: string): string {
   const raw = process.env.ORIGINGAME_AGENT_ORIGIN
   if (raw) {
@@ -95,7 +95,8 @@ export function agentOrigin(host: string): string {
     return url.origin
   }
   const url = new URL(host)
-  if (url.protocol !== 'https:') throw new WizardError('source_failed', `set ORIGINGAME_AGENT_ORIGIN to the Agent Service origin of ${host}`)
+  // A loopback development ingress serves every owner itself, as for the relay (apiOrigin).
+  if (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return url.origin
   return `https://agent.${url.hostname}`
 }
 

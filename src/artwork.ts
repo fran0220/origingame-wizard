@@ -49,6 +49,8 @@ async function ownImage(ui: Ui, kind: ImageKind, output: { width: number; height
  */
 export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir: string, input: { metadata: Metadata; summary: string; engine: string }): Promise<Artwork> {
   fs.mkdirSync(dir, { recursive: true })
+  // Candidates exist so a person can choose; a run without prompts draws one of each.
+  const count = { cover: ui.interactive ? rules.images.cover.candidates : 1, poster: ui.interactive ? rules.images.poster.candidates : 1 }
   const promptModel = client.textModel(rules.models.analyze)
   const imageModel = client.imageModel(rules.models.image)
   const s = ui.spinner('Writing artwork prompts')
@@ -57,7 +59,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
     input: {
       title: input.metadata.title, tagline: input.metadata.tagline, description: input.metadata.description, genre: input.metadata.genre,
       art_direction: input.metadata.art_direction ?? '', summary: input.summary, engine: input.engine,
-      cover: { aspect: '16:9', candidates: rules.images.cover.candidates }, poster: { aspect: '3:4', candidates: rules.images.poster.candidates },
+      cover: { aspect: '16:9', candidates: count.cover }, poster: { aspect: '3:4', candidates: count.poster },
     },
   })
   s.stop('Artwork prompts ready')
@@ -65,7 +67,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
   const generate = async (kind: ImageKind, attempt: number): Promise<Candidate[]> => {
     const rule = rules.images[kind]
     const output = parseSize(rule.output)
-    const list = prompts[kind].filter(p => p.trim()).slice(0, rule.candidates)
+    const list = prompts[kind].filter(p => p.trim()).slice(0, count[kind])
     if (!list.length) throw new WizardError('artwork_failed', `the artwork prompts had no ${kind}`)
     const settled = await Promise.allSettled(list.map(async (prompt, i) => {
       const image = await client.image(imageModel, prompt, rule.size, rule.fallback)
@@ -84,7 +86,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
 
   let attempt = 1
   for (;;) {
-    const g = ui.spinner(`Drawing ${rules.images.cover.candidates} cover and ${rules.images.poster.candidates} poster candidates with ${imageModel}`)
+    const g = ui.spinner(count.cover === 1 && count.poster === 1 ? `Drawing a cover and a poster with ${imageModel}` : `Drawing ${count.cover} cover and ${count.poster} poster candidates with ${imageModel}`)
     let candidates: Candidate[]
     try {
       const [covers, posters] = await Promise.all([generate('cover', attempt), generate('poster', attempt)])
@@ -97,7 +99,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
     const preview = previewPage(dir, input.metadata.title, candidates)
     ui.info(`Artwork preview: ${pathToFileURL(preview).href}`)
     for (const c of candidates) ui.info(`  ${c.kind} ${c.index}: ${c.file}`)
-    if (ui.interactive) openInBrowser(pathToFileURL(preview).href)
+    if (ui.interactive && (await ui.confirm('Open the artwork preview in your browser?', true))) openInBrowser(pathToFileURL(preview).href)
 
     const pick = async (kind: ImageKind): Promise<Buffer | 'again'> => {
       const options = candidates.filter(c => c.kind === kind)

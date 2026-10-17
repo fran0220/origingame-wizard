@@ -46,8 +46,11 @@ covers and confirm it fails. Never read source text in a test.
 ## Pull requests
 
 Keep changes small and focused, describe the user-visible effect, and run
-`npm test`. The project directory must stay byte-identical after a run without
-`--integrate`; the end-to-end tests check it.
+`npm test`. The person's folder must stay byte-identical after every run (in a
+Git repository: files, branch, HEAD, index and status), with all changes on the
+`origingame/publish` worktree branch or the staged copy; the end-to-end and
+terminal tests check it. Interactive behavior is tested through a real
+pseudo-terminal (`test/pty-driver.py`, `test/guided.test.mjs`).
 
 ## Releases
 
