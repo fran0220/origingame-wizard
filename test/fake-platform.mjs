@@ -2,7 +2,11 @@
 // (goals/origingame-wizard/contracts.md §1.1–1.3, §4, §5, §6): Identity device
 // sign-in, Wizard sessions and revocation, the public rules document, the AI
 // Gateway's chat and image routes (scripted answers, real PNGs of the requested
-// size, model allowlist), and Portal's source uploads, deploys and releases.
+// size, model allowlist), Portal's source uploads, deploys and releases, and
+// the Agent Service routes `--with-source` uses (agent-service README.md and
+// docs/facts.md: repositories, memberships, access, refs, file, server-side
+// commits with their 64-file / 512 KiB / 1 MiB limits and compare-and-swap,
+// checkpoints, publications, Git LFS batch/verify against an object store).
 // It records every request so tests can assert what the CLI actually sent.
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
@@ -80,6 +84,7 @@ export async function startPlatform({ rulesDir }) {
     readiness422: false,
     readinessSequence: null,
     script: () => { throw new Error('no model script') },
+    agent: { repos: new Map(), commits: new Map(), checkpoints: new Map(), lfs: new Map(), objects: new Map(), receipts: new Map(), bodies: [], raceNextCommit: false },
   }
   let imageSeq = 0
   const files = new Map()
@@ -105,6 +110,14 @@ export async function startPlatform({ rulesDir }) {
     return null
   }
 
+  /** Portal's `universe.publish_link` job: Agent links the release when the publisher owns the checkpoint's repository. */
+  function linkSource(checkpointId, gameId, releaseId) {
+    const checkpoint = checkpointId && state.agent.checkpoints.get(checkpointId)
+    const repo = checkpoint && state.agent.repos.get(checkpoint.repo)
+    if (!repo || repo.owner !== String(ACCOUNT.id)) return
+    repo.publications.unshift({ release_id: releaseId, game_id: gameId, checkpoint_id: checkpointId, commit_oid: checkpoint.commit, published_by: String(ACCOUNT.id), created_at: new Date().toISOString() })
+  }
+
   async function body(req) {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
@@ -125,6 +138,172 @@ export async function startPlatform({ rulesDir }) {
   function publicSession(session) {
     const { revoked, origin, ...rest } = session
     return rest
+  }
+
+  // Agent Service (an account credential is an owner principal, as for any account key).
+  const agentOwner = req => {
+    const token = bearer(req)
+    return token && state.deviceTokens.has(token) && !state.revokedDevices.has(token) ? String(ACCOUNT.id) : null
+  }
+  const IDEMPOTENCY = /^[A-Za-z0-9_-]{16,128}$/
+  const strict = (raw, allowed, limit = 256 << 10) => {
+    if (raw.length > limit) return { status: 413 }
+    let value
+    try { value = JSON.parse(raw.toString()) } catch { return { status: 400 } }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !allowed.includes(k))) return { status: 400 }
+    return { value }
+  }
+  const validRepoPath = p => typeof p === 'string' && !p.startsWith('/') && p.split('/').every(s => s && s !== '.' && s !== '..' && !/[\u0000-\u001f\u007f\\]/.test(s) && !['.git', '.gitmodules'].includes(s.toLowerCase()))
+  const oid40 = () => randomBytes(20).toString('hex')
+  function replay(owner, scope, keyValue, input, run) {
+    const id = `${owner}:${scope}:${keyValue}`
+    const hash = sha256(JSON.stringify(input))
+    const prior = state.agent.receipts.get(id)
+    if (prior) return prior.hash === hash ? { ...prior.answer, replayed: true } : { status: 409, body: { error: { code: 'idempotency_conflict', message: 'idempotency key reused with different input' } } }
+    const answer = run()
+    if (answer.status < 300) state.agent.receipts.set(id, { hash, answer })
+    return answer
+  }
+  const treeOf = commit => (commit ? new Map(state.agent.commits.get(commit).tree) : new Map())
+
+  async function agentRoute(req, res, url, raw) {
+    const route = `${req.method} ${url.pathname}`
+    state.agent.bodies.push({ method: req.method, path: url.pathname, body: raw })
+    const owner = agentOwner(req)
+    if (!owner) return fail(res, 401, 'unauthorized', 'invalid credential')
+    const send = a => json(res, a.status, a.body, a.replayed ? { 'idempotent-replayed': 'true' } : {})
+    const member = id => {
+      const repo = state.agent.repos.get(id)
+      return repo && repo.owner === owner ? repo : null
+    }
+    if (route === 'POST /v1/repositories') {
+      const key = req.headers['idempotency-key']
+      const { value, status } = strict(raw, ['name'])
+      if (!value) return fail(res, status, 'invalid_request', 'invalid JSON fields')
+      const name = String(value.name ?? '').trim()
+      if (name.length < 1 || Buffer.byteLength(name) > 120) return fail(res, 400, 'invalid_request', 'name must be 1-120 bytes')
+      if (!IDEMPOTENCY.test(key ?? '')) return fail(res, 400, 'invalid_request', 'Idempotency-Key must be 16-128 alphanumeric, dash or underscore characters')
+      return send(replay(owner, 'repository.create', key, value, () => {
+        const id = randomBytes(16).toString('hex')
+        state.agent.repos.set(id, { id, owner, name, archived: false, created_at: new Date().toISOString(), branches: new Map(), publications: [] })
+        return { status: 201, body: { id, name, git_path: `/git/${id}.git` } }
+      }))
+    }
+    if (route === 'GET /v1/memberships') {
+      return json(res, 200, [...state.agent.repos.values()].filter(r => r.owner === owner).map(r => ({ repository_id: r.id, user_id: owner, role: 'owner', archived: r.archived, name: r.name, title: r.name, created_at: r.created_at })))
+    }
+    if (route === 'POST /v1/checkpoints') {
+      const key = req.headers['idempotency-key']
+      const { value, status } = strict(raw, ['id', 'repository_id', 'commit', 'reason', 'parent_id', 'environment'])
+      if (!value) return fail(res, status, 'invalid_request', 'invalid JSON fields')
+      if (typeof value.reason !== 'string' || value.reason.length < 1 || value.reason.length > 240) return fail(res, 400, 'invalid_request', 'reason must be 1-240 bytes')
+      const repo = member(value.repository_id)
+      if (!repo) return fail(res, 404, 'not_found', 'repository not found')
+      if (!IDEMPOTENCY.test(key ?? '')) return fail(res, 400, 'invalid_request', 'Idempotency-Key must be 16-128 alphanumeric, dash or underscore characters')
+      return send(replay(owner, 'checkpoint.create', key, value, () => {
+        const commit = state.agent.commits.get(value.commit)
+        if (!commit || commit.repo !== repo.id) return { status: 400, body: { error: { code: 'invalid_request', message: 'commit not present on server' } } }
+        const id = randomBytes(16).toString('hex')
+        state.agent.checkpoints.set(id, { id, repo: repo.id, owner: repo.owner, commit: value.commit })
+        return { status: 201, body: { id, commit_oid: value.commit, ref: `refs/checkpoints/${id}` } }
+      }))
+    }
+    let m = /^\/v1\/repositories\/([0-9a-f]{32})\/(access|refs|file|commits|publications)$/.exec(url.pathname)
+    if (m) {
+      const repo = member(m[1])
+      if (!repo) return fail(res, 404, 'not_found', 'repository not found')
+      if (req.method === 'GET' && m[2] === 'access') return json(res, 200, { repository_id: repo.id, role: 'owner', can_write: !repo.archived, can_publish: true })
+      if (req.method === 'GET' && m[2] === 'refs') {
+        return json(res, 200, [...[...repo.branches].map(([name, commit]) => ({ name: `refs/heads/${name}`, commit })),
+          ...[...state.agent.checkpoints.values()].filter(c => c.repo === repo.id).map(c => ({ name: `refs/checkpoints/${c.id}`, commit: c.commit }))])
+      }
+      if (req.method === 'GET' && m[2] === 'file') {
+        const revision = url.searchParams.get('revision') ?? ''
+        const commit = /^[0-9a-f]{40}$/.test(revision) ? state.agent.commits.get(revision) : null
+        const bytes = commit?.repo === repo.id ? commit.tree.get(url.searchParams.get('path') ?? '') : undefined
+        if (!bytes) return fail(res, 400, 'invalid_request', 'file unavailable')
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment' }).end(bytes)
+        return
+      }
+      if (req.method === 'GET' && m[2] === 'publications') return json(res, 200, { items: repo.publications, next_cursor: null })
+      if (req.method === 'POST' && m[2] === 'commits') {
+        const { value, status } = strict(raw, ['branch', 'expected_head', 'message', 'files'], 1 << 20)
+        if (!value) return fail(res, status, status === 413 ? 'payload_too_large' : 'invalid_request', status === 413 ? 'JSON too large' : 'invalid JSON fields')
+        if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value.branch ?? '')) return fail(res, 400, 'invalid_request', 'invalid branch')
+        const expected = value.expected_head ?? ''
+        if (expected && !/^[0-9a-f]{40}$/.test(expected)) return fail(res, 400, 'invalid_request', 'expected_head must be a 40-hex commit')
+        if (typeof value.message !== 'string' || !value.message.trim() || value.message.length > 8192) return fail(res, 400, 'invalid_request', 'message must be 1-8192 bytes')
+        if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 64) return fail(res, 400, 'invalid_request', 'files must hold 1-64 entries')
+        const seen = new Set()
+        let total = 0
+        const decoded = []
+        for (const f of value.files) {
+          if (!validRepoPath(f?.path) || seen.has(f.path)) return fail(res, 400, 'invalid_request', 'invalid or repeated file path')
+          seen.add(f.path)
+          if ((f.delete === true) === (typeof f.content_base64 === 'string')) return fail(res, 400, 'invalid_request', 'each file needs content_base64 or delete:true')
+          const content = f.delete ? null : Buffer.from(f.content_base64, 'base64')
+          if (content && content.toString('base64') !== f.content_base64) return fail(res, 400, 'invalid_request', 'content_base64 must be standard base64')
+          total += content?.length ?? 0
+          decoded.push({ path: f.path, content })
+        }
+        if (total > 512 * 1024) return fail(res, 413, 'payload_too_large', 'commit content exceeds 512 KiB')
+        const key = req.headers['idempotency-key']
+        if (!IDEMPOTENCY.test(key ?? '')) return fail(res, 400, 'invalid_request', 'Idempotency-Key must be 16-128 alphanumeric, dash or underscore characters')
+        if (state.agent.raceNextCommit) {
+          // Another writer moved the branch in the meantime.
+          state.agent.raceNextCommit = false
+          const other = oid40()
+          const parent = repo.branches.get(value.branch) ?? null
+          state.agent.commits.set(other, { repo: repo.id, parent, tree: treeOf(parent).set('elsewhere.txt', Buffer.from('another writer\n')) })
+          repo.branches.set(value.branch, other)
+        }
+        return send(replay(owner, `repository.commit/${repo.id}`, key, value, () => {
+          const head = repo.branches.get(value.branch) ?? ''
+          if (head !== expected) return { status: 409, body: { error: { code: 'stale_head', message: 'the branch head is not expected_head; reread the branch and retry', current_head: head || null } } }
+          const tree = treeOf(head || null)
+          for (const f of decoded) {
+            if (f.content) {
+              if ([...tree.keys()].some(p => p.startsWith(`${f.path}/`) || f.path.startsWith(`${p}/`))) return { status: 409, body: { error: { code: 'path_conflict', message: 'path conflict' } } }
+              tree.set(f.path, f.content)
+            } else tree.delete(f.path)
+          }
+          const commit = oid40()
+          state.agent.commits.set(commit, { repo: repo.id, parent: head || null, tree, message: value.message, files: value.files.length, bytes: total })
+          repo.branches.set(value.branch, commit)
+          return { status: 201, body: { branch: value.branch, commit, parent: head || null } }
+        }))
+      }
+    }
+    m = /^\/git\/([0-9a-f]{32})\.git\/info\/lfs\/objects\/(batch|verify)$/.exec(url.pathname)
+    if (m && req.method === 'POST') {
+      const repo = member(m[1])
+      if (!repo) return fail(res, 404, 'not_found', 'repository not found')
+      if (m[2] === 'verify') {
+        const { value } = strict(raw, ['oid', 'size'])
+        const object = value && state.agent.lfs.get(value.oid)
+        const bytes = value && state.agent.objects.get(value.oid)
+        if (!object || !bytes || bytes.length !== value.size || sha256(bytes) !== value.oid) return fail(res, 409, 'conflict', 'LFS uploaded bytes mismatch')
+        object.verified = true
+        return json(res, 200, {})
+      }
+      const { value } = strict(raw, ['operation', 'transfers', 'objects', 'ref', 'hash_algo'])
+      if (!value || value.operation !== 'upload' || !Array.isArray(value.objects) || value.objects.length < 1 || value.objects.length > 100) return fail(res, 400, 'invalid_request', 'invalid LFS batch')
+      const objects = value.objects.map(o => {
+        if (!/^[a-f0-9]{64}$/.test(o.oid) || !(o.size >= 0)) return { oid: o.oid, size: o.size, error: { code: 422, message: 'invalid object' } }
+        const known = state.agent.lfs.get(o.oid) ?? { size: o.size, verified: false, repos: new Set() }
+        known.repos.add(repo.id)
+        state.agent.lfs.set(o.oid, known)
+        if (known.verified) return { oid: o.oid, size: o.size, authenticated: true }
+        return {
+          oid: o.oid, size: o.size, authenticated: true, actions: {
+            upload: { href: `${state.origin}/objects/lfs/${o.oid}`, header: { 'x-amz-checksum-sha256': Buffer.from(o.oid, 'hex').toString('base64') }, expires_in: 900 },
+            verify: { href: `${state.origin}/git/${repo.id}.git/info/lfs/objects/verify`, header: { Authorization: req.headers.authorization }, expires_in: 900 },
+          },
+        }
+      })
+      return json(res, 200, { transfer: 'basic', objects, hash_algo: 'sha256' })
+    }
+    return fail(res, 404, 'not_found', 'not found')
   }
 
   async function handle(req, res) {
@@ -217,6 +396,18 @@ export async function startPlatform({ rulesDir }) {
       return
     }
 
+    // Agent Service.
+    if (/^\/v1\/(repositories|memberships|checkpoints)(\/|$)/.test(url.pathname) || url.pathname.startsWith('/git/')) return agentRoute(req, res, url, raw)
+    // The object store behind LFS's presigned PUT URLs (checksum-bound).
+    const lfsPut = /^\/objects\/lfs\/([a-f0-9]{64})$/.exec(url.pathname)
+    if (lfsPut && req.method === 'PUT') {
+      const expected = state.agent.lfs.get(lfsPut[1])
+      if (!expected || raw.length !== expected.size || Buffer.from(lfsPut[1], 'hex').toString('base64') !== req.headers['x-amz-checksum-sha256'] || sha256(raw) !== lfsPut[1]) return json(res, 400, { error: 'BadDigest' })
+      state.agent.objects.set(lfsPut[1], raw)
+      res.writeHead(200).end()
+      return
+    }
+
     // Portal (contracts §5).
     if (url.pathname.startsWith('/api/deploy')) {
       const owner = portalOwner(req)
@@ -285,6 +476,7 @@ export async function startPlatform({ rulesDir }) {
           const releaseId = `release_${id}_v1`
           const game = { id, slug, version: 1, revision: 3, currentReleaseId: releaseId, releases: [{ releaseId, version: 1 }], fields }
           state.games.set(id, game)
+          linkSource(fields.source_checkpoint, id, releaseId)
           return json(res, 201, { gameId: id, slug, version: 1, releaseId, traceId: fields.operation_id, warnings: [], playUrl: `${state.origin}/play/${id}/`, portalUrl: `${state.origin}/g/${slug}`, operationId: fields.operation_id })
         }
         const game = state.games.get(url.pathname.split('/').at(-1))
@@ -297,6 +489,7 @@ export async function startPlatform({ rulesDir }) {
         const releaseId = `release_${game.id}_v${game.version}`
         game.releases.unshift({ releaseId, version: game.version })
         game.currentReleaseId = releaseId
+        linkSource(fields.source_checkpoint, game.id, releaseId)
         return json(res, 200, { gameId: game.id, slug: game.slug, version: game.version, releaseId, traceId: fields.operation_id, warnings: [{ code: 'size.total', message: 'fixture advisory' }], playUrl: `${state.origin}/play/${game.id}/`, portalUrl: `${state.origin}/g/${game.slug}`, operationId: fields.operation_id })
       }
     }

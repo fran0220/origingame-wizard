@@ -33,7 +33,7 @@ Options:
   --yes                      accept the defaults; never prompt
   --json                     print one JSON result line on stdout (implies --yes); progress goes to stderr
   --integrate                also wire scores and saves into your source (shows a diff first)
-  --with-source              also upload your source to a private repository (not available yet)
+  --with-source              also commit your source (as Git tracks it) to a private OriginGame repository
   --game <id>                update this game instead of the one remembered for the directory
   --title <title>            game title
   --unlisted                 publish without listing the game in the catalog
@@ -109,6 +109,9 @@ export function parseOptions(argv: string[]): Options {
     throw new WizardError('invalid_arguments', '--source-checkpoint must match [a-zA-Z0-9_-]{1,200}')
   }
   if (options.title !== undefined && !options.title.trim()) throw new WizardError('invalid_arguments', '--title must not be empty')
+  if (options.withSource && options.sourceCheckpoint) {
+    throw new WizardError('invalid_arguments', '--with-source uploads the source and records its checkpoint; do not combine it with --source-checkpoint')
+  }
   if (options.credentialsFile && !options.sourceCheckpoint) {
     throw new WizardError('invalid_arguments', '--credentials-file (sandbox mode) requires --source-checkpoint')
   }

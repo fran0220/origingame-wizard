@@ -55,7 +55,32 @@ Never sent:
 
 - credential files: `.env*`, `*.pem`, `*.key`, `*.p12`, keystores, `id_*` SSH keys, `.npmrc`, `.netrc`, `credentials.*`, `secrets.*`, service account files. They are also never uploaded;
 - any file with a line that looks like a credential (cloud and API key formats, private key blocks, `api_key = "…"` style assignments). If such a file is part of your game, it is still published (removing it could break the game) and the run warns you, because a key in a public game is public;
-- your source code is not uploaded to OriginGame; only the built game is published. (`--with-source`, a private source repository, is not available yet.)
+- your source code is not uploaded to OriginGame unless you pass `--with-source` (below); otherwise only the built game is published.
+
+## Your source in a private repository (`--with-source`)
+
+With `--with-source`, the run also commits your project's source to a private
+repository on OriginGame owned by your account and links it to the published
+game, so you can continue the game with the Origin agent. Nothing is uploaded
+without the flag; in a terminal the Wizard shows what it would upload and asks
+(the default is no); with `--yes` or `--json` the flag itself is the consent.
+
+- What is uploaded is what Git would track: every `.gitignore` in the project
+  applies, and `node_modules`, `.git` and engine caches are skipped. Credential
+  files and files with a credential-like line are left out and listed; symbolic
+  links are not followed.
+- Files up to 256 KB are committed as they are; larger ones (textures, audio,
+  `.pck`) are stored with Git LFS and committed as LFS pointers, with a
+  generated block in `.gitattributes`.
+- The repository keeps `.origin/wizard-source.json`, the list of what the
+  Wizard committed; a later run commits only files that changed since and
+  deletes files you removed. The same repository is reused: the one remembered
+  for the directory, or the one already linked to the game you update.
+- Limits: 5,000 files, 1 GiB in total, 512 MiB per file, and your account's
+  2 GiB storage for large files. Over a limit, the run stops before any model
+  call; if the upload fails, nothing is published.
+- It uses your own sign-in, not the platform-funded session, and never writes
+  to your project directory.
 
 The prompts the Wizard uses are public and versioned: they are downloaded at
 startup from `https://origingame.ai/wizard/v1/rules.json` (the version is shown
@@ -90,7 +115,7 @@ npx origingame login | logout | whoami
 | `--yes` | accept the defaults and never prompt |
 | `--json` | print exactly one JSON line on stdout; progress goes to stderr. Implies `--yes` |
 | `--integrate` | wire scores and saves to the Player protocol in your source. Shows a diff and asks first; with `--yes` the git tree must be clean. HTML and JavaScript projects only |
-| `--with-source` | upload your source to a private repository (not available yet; the run continues without it) |
+| `--with-source` | also commit your source (as Git tracks it) to a private OriginGame repository linked to the game (see above) |
 | `--game <id>` | update this game instead of the one remembered for the directory |
 | `--title <title>` | the game's title |
 | `--unlisted` | publish without listing the game in the catalog |
@@ -105,7 +130,8 @@ instead of the stored sign-in, never written to disk), `GODOT` (path to the
 Godot editor), `CI` (fail instead of starting a browser sign-in),
 `ORIGINGAME_NO_BROWSER=1` (print the sign-in link without opening a browser),
 `ORIGINGAME_READINESS_WAIT_SECONDS` (how long to wait for the readiness check,
-default 60).
+default 60), `ORIGINGAME_AGENT_ORIGIN` (the Agent Service origin for
+`--with-source`; default `https://agent.<host>`).
 
 ### In coding agents and CI
 
@@ -120,15 +146,18 @@ stdout is a single JSON line:
 ```json
 {"ok":true,"action":"created","gameId":"…","slug":"…","version":1,"releaseId":"…","playUrl":"…","portalUrl":"…",
  "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","stageSha256":"…","rulesVersion":"…","adaptations":["…"],
- "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":3,"imageCalls":5,"models":["…"]}}
+ "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":3,"imageCalls":5,"models":["…"]},
+ "source":null}
 {"ok":false,"error":{"code":"build_failed","message":"…"}}
 ```
 
 Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`,
-`adapt_failed`, `artwork_failed`, `upload_failed`, `publish_failed`,
+`adapt_failed`, `artwork_failed`, `upload_failed`, `source_failed`, `publish_failed`,
 `readiness_failed` (with `error.readiness`), `rules_unavailable`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
+With `--with-source`, `source` is `{repositoryId, checkpointId, commit,
+createdRepository, files, bytes, committed, deleted, lfsObjects, withheld}`.
 
 If the agent's machine is not signed in, the command prints a sign-in link and
 code on stderr and waits for you to approve it in the browser. In CI, sign in

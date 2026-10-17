@@ -158,6 +158,8 @@ describe('deploy --yes --json', () => {
     assert.match(r.rulesVersion, /^[0-9a-f]{16}$/)
     assert.equal(r.usage.sessionId, run.sessions[0].session_id)
     assert.equal(afterHash, beforeHash, 'project directory is byte-identical')
+    assert.equal(r.source, null)
+    assert.equal(run.requests.filter(q => q.path.startsWith('/v1/repositories') || q.path.startsWith('/v1/memberships') || q.path.startsWith('/v1/checkpoints') || q.path.startsWith('/git/')).length, 0, 'without --with-source nothing reaches Agent Service')
 
     const deploy = run.deploys.at(-1)
     assert.equal(deploy.method, 'POST')
@@ -482,5 +484,161 @@ describe('--integrate', () => {
     assert.equal(cli.code, 1)
     assert.equal(cli.result.error.code, 'adapt_failed')
     assert.equal(treeHash(project), beforeHash)
+  })
+})
+
+describe('--with-source', () => {
+  const AGENT = () => ({ ORIGINGAME_AGENT_ORIGIN: platform.origin })
+  const agentRequests = run => run.requests.filter(q => /^\/v1\/(repositories|memberships|checkpoints)/.test(q.path) || q.path.startsWith('/git/') || q.path.startsWith('/objects/'))
+  const MUSIC = Buffer.from(Array.from({ length: 300 * 1024 }, (_, i) => (i * 7919 + (i >> 8)) & 255))
+
+  /** plain-html plus what a real project has around it: ignore rules, logs, a build directory, a large asset, a link, many small files. */
+  function sourceProject() {
+    const project = copyFixture('plain-html')
+    const write = (file, content) => { fs.mkdirSync(path.dirname(path.join(project, file)), { recursive: true }); fs.writeFileSync(path.join(project, file), content) }
+    write('.gitignore', '# local\n*.log\n!keep.log\n/build/\n')
+    write('debug.log', 'noise\n')
+    write('keep.log', 'kept on purpose\n')
+    write('build/out.js', 'generated\n')
+    write('notes/.gitignore', 'private.txt\n')
+    write('notes/private.txt', 'not for the repository\n')
+    write('notes/public.txt', 'design notes\n')
+    write('assets/music.ogg', MUSIC)
+    for (let i = 0; i < 150; i++) write(`levels/gen/${String(i).padStart(3, '0')}.json`, JSON.stringify({ level: i, stars: Array.from({ length: 40 }, (_, j) => j * i) }))
+    fs.symlinkSync('README.md', path.join(project, 'readme-link.md'))
+    return project
+  }
+
+  const repoOf = id => platform.state.agent.repos.get(id)
+  const mainTree = id => platform.state.agent.commits.get(repoOf(id).branches.get('main')).tree
+
+  test('commits the tracked source to a private repository, large files through LFS, and publishes with its checkpoint', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const project = sourceProject()
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const beforeHash = treeHash(project)
+    const m = mark()
+    const bodies = platform.state.agent.bodies.length
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--with-source', '--host', platform.origin], { home, env: AGENT() })
+    const run = since(m)
+    assert.equal(cli.code, 0, cli.stderr)
+    const source = cli.result.source
+    assert.ok(source && /^[0-9a-f]{32}$/.test(source.repositoryId) && /^[0-9a-f]{32}$/.test(source.checkpointId), JSON.stringify(source))
+    assert.equal(source.createdRepository, true)
+    assert.equal(treeHash(project), beforeHash, 'the project directory is not written')
+
+    // What main holds: exactly what Git would track, minus credentials, plus the LFS attributes and the upload manifest.
+    const tree = mainTree(source.repositoryId)
+    const expected = ['.gitattributes', '.gitignore', '.origin/wizard-source.json', 'README.md', 'assets/bg.png', 'assets/music.ogg', 'game.js', 'index.html', 'keep.log', 'levels/1.json',
+      ...Array.from({ length: 150 }, (_, i) => `levels/gen/${String(i).padStart(3, '0')}.json`), 'notes/.gitignore', 'notes/public.txt', 'style.css'].sort()
+    assert.deepEqual([...tree.keys()].sort(), expected)
+    for (const file of expected.filter(f => !['.gitattributes', '.origin/wizard-source.json', 'assets/music.ogg'].includes(f))) {
+      assert.equal(sha256(tree.get(file)), sha256(fs.readFileSync(path.join(project, file))), `${file} is committed byte for byte`)
+    }
+    const oid = sha256(MUSIC)
+    assert.equal(tree.get('assets/music.ogg').toString(), `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${MUSIC.length}\n`)
+    assert.equal(platform.state.agent.lfs.get(oid).verified, true, 'the LFS object was uploaded and verified')
+    assert.equal(sha256(platform.state.agent.objects.get(oid)), oid)
+    assert.match(tree.get('.gitattributes').toString(), /^\/assets\/music\.ogg filter=lfs diff=lfs merge=lfs -text$/m)
+
+    // Withheld, and never sent anywhere on the Agent side.
+    const reasons = Object.fromEntries(source.withheld.map(w => [w.path, w.reason]))
+    assert.equal(reasons['id_ed25519'], 'credential file')
+    assert.equal(reasons['.env'], 'credential file')
+    assert.match(reasons['analytics.js'], /aws-access-key/)
+    assert.equal(reasons['readme-link.md'], 'symbolic link')
+    const sent = Buffer.concat(platform.state.agent.bodies.slice(bodies).map(b => b.body)).toString('latin1')
+    const decodedCommits = platform.state.agent.bodies.slice(bodies).filter(b => b.path.endsWith('/commits')).flatMap(b => JSON.parse(b.body.toString()).files).map(f => (f.content_base64 ? Buffer.from(f.content_base64, 'base64').toString('latin1') : '')).join('\n')
+    for (const secret of ['AKIAIOSFODNN7EXAMPLE', fs.readFileSync(path.join(project, 'id_ed25519'), 'latin1'), fs.readFileSync(path.join(project, '.env'), 'latin1')]) {
+      assert.ok(!sent.includes(secret) && !decodedCommits.includes(secret), 'a withheld file never reaches Agent Service')
+    }
+
+    // Several commits within Agent's limits, then one checkpoint at the head, named by the publication.
+    const commits = run.requests.filter(q => q.method === 'POST' && q.path === `/v1/repositories/${source.repositoryId}/commits`)
+    assert.ok(commits.length >= 3, `150+ files need several commits (${commits.length})`)
+    assert.equal(source.commit, repoOf(source.repositoryId).branches.get('main'))
+    assert.equal(platform.state.agent.checkpoints.get(source.checkpointId).commit, source.commit)
+    const deploy = run.deploys.at(-1)
+    assert.equal(deploy.fields.source_checkpoint, source.checkpointId)
+    assert.equal(deploy.authorization, `Bearer ${DEVICE_TOKEN}`)
+    assert.ok(agentRequests(run).filter(q => q.path.startsWith('/v1/') || q.path.startsWith('/git/')).every(q => q.authorization === `Bearer ${DEVICE_TOKEN}`), 'Agent Service sees the person\'s own credential, never the session')
+    assert.deepEqual(repoOf(source.repositoryId).publications.map(p => [p.game_id, p.checkpoint_id]), [[cli.result.gameId, source.checkpointId]])
+    const projects = JSON.parse(fs.readFileSync(path.join(home, '.origingame', 'projects.json'), 'utf8'))
+    assert.equal(Object.values(projects)[0].repositoryId, source.repositoryId)
+    report.scenarios.withSource = { exitCode: cli.code, source, commits: commits.length, tree: [...tree.keys()].length }
+
+    // Update: the same repository (remembered: Portal links releases through an outbox, so the link may still be pending);
+    // only what changed is committed; a removed file is deleted; LFS is not re-sent.
+    const pendingLinks = repoOf(source.repositoryId).publications.splice(0)
+    fs.appendFileSync(path.join(project, 'game.js'), '\n// tuned\n')
+    fs.rmSync(path.join(project, 'notes/public.txt'))
+    fs.writeFileSync(path.join(project, 'levels/2.json'), '{"stars":[1,2,3]}\n')
+    const m2 = mark()
+    const update = await runCli(['deploy', '--dir', project, '--yes', '--json', '--with-source', '--host', platform.origin], { home, env: AGENT() })
+    const run2 = since(m2)
+    assert.equal(update.code, 0, update.stderr)
+    assert.equal(update.result.source.repositoryId, source.repositoryId)
+    assert.equal(update.result.source.createdRepository, false)
+    assert.equal(run2.requests.filter(q => q.method === 'POST' && q.path === '/v1/repositories').length, 0, 'no second repository')
+    const sentFiles = platform.state.agent.bodies.filter(b => b.path === `/v1/repositories/${source.repositoryId}/commits`).slice(-run2.requests.filter(q => q.path.endsWith('/commits')).length)
+      .flatMap(b => JSON.parse(b.body.toString()).files.map(f => `${f.delete ? '-' : '+'}${f.path}`)).sort()
+    assert.deepEqual(sentFiles, ['+.origin/wizard-source.json', '+game.js', '+levels/2.json', '-notes/public.txt'])
+    assert.equal(run2.requests.filter(q => q.path.includes('/info/lfs/')).length, 0)
+    const tree2 = mainTree(source.repositoryId)
+    assert.equal(tree2.has('notes/public.txt'), false)
+    assert.equal(tree2.get('game.js').toString(), fs.readFileSync(path.join(project, 'game.js'), 'utf8'))
+    assert.notEqual(update.result.source.checkpointId, source.checkpointId)
+    assert.equal(run2.deploys.at(-1).fields.source_checkpoint, update.result.source.checkpointId)
+    report.scenarios.withSourceUpdate = { exitCode: update.code, source: update.result.source, files: sentFiles }
+    repoOf(source.repositoryId).publications.push(...pendingLinks)
+
+    // Another machine (nothing remembered), same game: the linked repository is found through its publications.
+    const m3 = mark()
+    const elsewhere = await runCli(['deploy', '--dir', project, '--yes', '--json', '--with-source', '--game', cli.result.gameId, '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: AGENT() })
+    const run3 = since(m3)
+    assert.equal(elsewhere.code, 0, elsewhere.stderr)
+    assert.equal(elsewhere.result.source.repositoryId, source.repositoryId)
+    assert.equal(run3.requests.filter(q => q.method === 'POST' && q.path === '/v1/repositories').length, 0)
+    assert.equal(run3.requests.filter(q => q.path.endsWith('/commits')).length, 0, 'nothing changed, nothing committed')
+  })
+
+  test('a source over the limits fails with source_failed before any model call or publication', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const project = copyFixture('plain-html')
+    for (let i = 0; i < 5001; i++) fs.writeFileSync(path.join(project, `f${i}.txt`), '')
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--json', '--with-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: AGENT() })
+    const run = since(m)
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'source_failed')
+    assert.match(cli.result.error.message, /5\d{3} files; the limit is 5000/)
+    assert.equal(run.chat.length, 0)
+    assert.equal(run.deploys.length, 0)
+    assert.equal(agentRequests(run).length, 0)
+    assert.equal(run.sessions[0].revoked, true)
+  })
+
+  test('another writer moving main mid-upload is source_failed, and nothing is published', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const project = copyFixture('plain-html')
+    platform.state.agent.raceNextCommit = true
+    try {
+      const m = mark()
+      const cli = await runCli(['deploy', '--dir', project, '--json', '--with-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: AGENT() })
+      const run = since(m)
+      assert.equal(cli.code, 1)
+      assert.equal(cli.result.error.code, 'source_failed')
+      assert.match(cli.result.error.message, /changed while uploading/)
+      assert.equal(run.deploys.length, 0)
+      assert.equal(run.sessions[0].revoked, true)
+    } finally {
+      platform.state.agent.raceNextCommit = false
+    }
+  })
+
+  test('--with-source with --source-checkpoint is invalid_arguments', async () => {
+    const cli = await runCli(['deploy', '--json', '--with-source', '--source-checkpoint', 'ckpt_x', '--host', platform.origin], { home: tempDir('home') })
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'invalid_arguments')
   })
 })

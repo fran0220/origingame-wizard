@@ -61,7 +61,8 @@ export function deleteCredentials(): boolean {
   }
 }
 
-export interface ProjectMemory { gameId: string; slug: string; host: string }
+/** `repositoryId`: the private source repository `--with-source` committed to. */
+export interface ProjectMemory { gameId: string; slug: string; host: string; repositoryId?: string }
 
 const projectsFile = () => path.join(homeDir(), 'projects.json')
 

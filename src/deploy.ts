@@ -19,6 +19,7 @@ import { ModelClient, newUsage } from './model.js'
 import { Portal, publishError } from './portal.js'
 import { fetchRules, type Rules } from './rules.js'
 import { findSecrets } from './secrets.js'
+import { planSource, uploadSource, type SourcePlan, type SourceReport } from './source.js'
 import { issueSession, readSandboxFile, revokeSession, type PortalAuth, type Sandbox, type WizardSession } from './session.js'
 import { checkPortalLimits, precheckPortalLimits, stageCopy, stageManifest } from './stage.js'
 import { ADAPT_SCHEMA, analyze, mergePlan, metadataSchema, type Edit, type Metadata } from './tasks.js'
@@ -43,6 +44,8 @@ export interface DeployResult {
   rulesVersion: string
   adaptations: string[]
   usage: { sessionId: string; quota: number; promptTokens: number; completionTokens: number; chatCalls: number; imageCalls: number; models: string[] }
+  /** The private source repository and checkpoint (`--with-source`), or null. */
+  source: SourceReport | null
 }
 
 const SKIP_SCAN = new Set(['node_modules', '.git', '.godot', '.import', '.svn', '.hg', '.cache', '.vite', '.next'])
@@ -73,7 +76,8 @@ const CONSENT_TEXT = (rules: Rules) => [
   `Artwork: ${rules.models.image} draws a cover and a poster from a text description only (no screenshots).`,
   'Cost: OriginGame pays. The run uses a platform-funded session (≤ 30 minutes, capped budget); your wallet is not charged.',
   'Your project directory is not modified (except with --integrate, after you approve a diff); adapted files are staged in ~/.origingame/stage/.',
-  'Publishing uploads the built game (not your source) and makes it playable on OriginGame (--unlisted keeps it out of the catalog).',
+  'Publishing uploads the built game and makes it playable on OriginGame (--unlisted keeps it out of the catalog).',
+  'Your source is uploaded only with --with-source, to a private repository that only you can open.',
 ].join('\n')
 
 async function confirmPlan(ui: Ui, items: PlanItem[]): Promise<PlanItem[]> {
@@ -148,7 +152,21 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     } else if (!sandbox && !hasConsented()) {
       ui.info(`--yes: accepted the data notice (version ${CONSENT_VERSION}); see the README for what is sent`)
     }
-    if (options.withSource && !sandbox) ui.warn('--with-source is not available yet: your source is not uploaded.')
+    // Source upload: only with the explicit flag, checked before any model spend.
+    let sourcePlan: SourcePlan | null = null
+    if (options.withSource && !sandbox) {
+      sourcePlan = planSource(projectDir)
+      for (const w of sourcePlan.withheld) ui.info(`Source not uploaded: ${w.path} (${w.reason})`)
+      ui.note('Source upload (--with-source)', [
+        `${sourcePlan.files.length} files (${(sourcePlan.totalBytes / 1048576).toFixed(1)} MiB) as Git tracks them (.gitignore applies; credential files and files with key-like lines are left out)`,
+        'go to a private repository on OriginGame that only your account can open, linked to this game, so you can continue it in Origin.',
+      ].join('\n'))
+      // Interactive runs default to no; with --yes or --json the flag itself is the consent.
+      if (!(await ui.confirm('Upload your source to a private repository?', !ui.interactive))) {
+        ui.info('Your source is not uploaded.')
+        sourcePlan = null
+      }
+    }
 
     // The game this directory publishes to.
     const portal = new Portal(host, portalAuth)
@@ -266,7 +284,17 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       })
     }
 
-    // Upload and publish.
+    // Source, then upload and publish: a failed source upload publishes nothing.
+    let source: SourceReport | null = null
+    const memory = sandbox ? null : rememberedGame(projectDir, host)
+    if (sourcePlan) {
+      ui.step('Uploading your source to a private repository')
+      source = await uploadSource({
+        host, token: portalAuth.token, plan: sourcePlan, name: metadata?.title ?? options.title ?? path.basename(projectDir),
+        gameId, remembered: memory?.repositoryId, ui,
+      })
+      ui.success(`Source checkpoint ${source.checkpointId} (${source.committed} changed, ${source.deleted} removed${source.lfsObjects ? `, ${source.lfsObjects} with Git LFS` : ''})`)
+    }
     const upload = await portal.upload(manifest, ui)
     let revision: number | null = null
     if (gameId) {
@@ -280,7 +308,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       f.set('sourceUploadId', upload.sourceUploadId)
       f.set('engine', detection.engine)
       f.set('provenance', provenance)
-      if (options.sourceCheckpoint) f.set('source_checkpoint', options.sourceCheckpoint)
+      const checkpoint = options.sourceCheckpoint ?? source?.checkpointId
+      if (checkpoint) f.set('source_checkpoint', checkpoint)
       if (options.unlisted) f.set('unlisted', '1')
       if (revision !== null) f.set('expected_revision', String(revision))
       if (options.title && !metadata) f.set('title', options.title.trim())
@@ -311,7 +340,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       if (w && typeof w.message === 'string') warnings.push({ code: String(w.code ?? 'portal'), message: w.message, ...(w.path ? { path: String(w.path) } : {}) })
     }
     const published = { gameId: String(body.gameId), slug: String(body.slug ?? ''), version: Number(body.version), releaseId: String(body.releaseId) }
-    if (!sandbox) rememberGame(projectDir, { gameId: published.gameId, slug: published.slug, host })
+    const repositoryId = source?.repositoryId ?? memory?.repositoryId
+    if (!sandbox) rememberGame(projectDir, { gameId: published.gameId, slug: published.slug, host, ...(repositoryId ? { repositoryId } : {}) })
 
     const waitSeconds = sandbox ? 0 : Math.max(0, Number(process.env.ORIGINGAME_READINESS_WAIT_SECONDS ?? 60) || 0)
     const readiness = await portal.readiness(published.gameId, published.releaseId, waitSeconds * 1000, ui)
@@ -324,6 +354,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       playUrl: String(body.playUrl ?? ''), portalUrl: String(body.portalUrl ?? ''),
       readiness, warnings, engine: detection.engine, stageSha256: manifest.hash, rulesVersion: rules.version, adaptations,
       usage: { sessionId: active.session_id, quota: active.budget_quota, ...usage },
+      source,
     }
     telemetry.track('published', { action, engine: detection.engine })
     ui.note(action === 'created' ? 'Published' : `Updated to version ${published.version}`, `Play: ${result.playUrl}\nPage: ${result.portalUrl}`)

@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'adapt_failed'
   | 'artwork_failed'
   | 'upload_failed'
+  | 'source_failed'
   | 'publish_failed'
   | 'readiness_failed'
   | 'rules_unavailable'

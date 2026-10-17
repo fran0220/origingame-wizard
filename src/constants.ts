@@ -25,6 +25,21 @@ export const PORTAL_LIMITS = {
   maxImageBytes: 5 * 1024 * 1024,
 } as const
 
+/**
+ * `--with-source` limits. Agent Service takes at most 64 files and 512 KiB of
+ * content per server-side commit (agent-service docs/facts.md); files above
+ * `lfsThreshold` go through Git LFS, which shares the account's 2 GiB quota.
+ */
+export const SOURCE_LIMITS = {
+  maxFiles: 5_000,
+  maxFileBytes: 512 * 1024 * 1024,
+  maxTotalBytes: 1024 * 1024 * 1024,
+  lfsThreshold: 256 * 1024,
+  commitFiles: 64,
+  commitBytes: 448 * 1024,
+  scanBytes: 4 * 1024 * 1024,
+} as const
+
 /** Portal's cover/poster acceptance (server/src/lib/game-media.ts). */
 export const IMAGE_RULES = {
   cover: { ratio: 16 / 9, tolerance: 0.08, minWidth: 640, minHeight: 360 },
