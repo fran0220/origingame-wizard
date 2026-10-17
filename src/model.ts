@@ -9,12 +9,35 @@ export function newUsage(): Usage {
   return { promptTokens: 0, completionTokens: 0, chatCalls: 0, imageCalls: 0, models: [] }
 }
 
+const LOOPBACK = ['localhost', '127.0.0.1', '[::1]']
+
+/**
+ * The AI Gateway relay (`/v1/*`) of a host: `ORIGINGAME_API_ORIGIN`, else
+ * `https://api.<host>`. The Portal origin does not serve the relay rows
+ * (docs/public-api.md, Hosts); a loopback development ingress serves every row.
+ */
+export function apiOrigin(host: string): string {
+  const raw = process.env.ORIGINGAME_API_ORIGIN
+  if (raw) {
+    let url: URL
+    try { url = new URL(raw) } catch { throw new WizardError('invalid_arguments', 'ORIGINGAME_API_ORIGIN must be an origin') }
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOOPBACK.includes(url.hostname))) {
+      throw new WizardError('invalid_arguments', 'ORIGINGAME_API_ORIGIN must use https (http is allowed only for localhost)')
+    }
+    return url.origin
+  }
+  const url = new URL(host)
+  if (url.protocol === 'http:' && LOOPBACK.includes(url.hostname)) return url.origin
+  return `https://api.${url.hostname}`
+}
+
 /**
  * The model side of a run: chat completions and image generations through
  * the platform AI Gateway with the run's Wizard session (`ogp-`). The
  * Gateway enforces the model allowlist and the per-run budget.
  */
 export class ModelClient {
+  /** `host` is the relay origin (apiOrigin), not the Portal. */
   constructor(readonly host: string, private readonly session: WizardSession, readonly usage: Usage) {}
 
   /** The preferred model when this session may use it, else the first allowlisted text model. */

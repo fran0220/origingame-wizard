@@ -309,7 +309,7 @@ export async function startPlatform({ rulesDir }) {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://fake')
     const raw = await body(req)
-    const record = { method: req.method, path: url.pathname, query: url.search, authorization: req.headers.authorization ?? null, repository: req.headers['x-origin-repository'] ?? null, contentType: req.headers['content-type'] ?? null, bytes: raw.length }
+    const record = { method: req.method, host: req.headers.host ?? null, path: url.pathname, query: url.search, authorization: req.headers.authorization ?? null, repository: req.headers['x-origin-repository'] ?? null, contentType: req.headers['content-type'] ?? null, bytes: raw.length }
     state.requests.push(record)
     const route = `${req.method} ${url.pathname}`
 

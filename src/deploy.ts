@@ -15,7 +15,7 @@ import { collectFindings, type PlanItem } from './findings.js'
 import { CONSENT_VERSION, forgetGame, freshStage, hasConsented, projectKey, recordConsent, rememberedGame, rememberGame } from './home.js'
 import { integrate } from './integrate.js'
 import { deviceLogin, storedCredential } from './login.js'
-import { ModelClient, newUsage } from './model.js'
+import { ModelClient, apiOrigin, newUsage } from './model.js'
 import { Portal, publishError } from './portal.js'
 import { fetchRules, type Rules } from './rules.js'
 import { findSecrets } from './secrets.js'
@@ -200,7 +200,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     const hasSource = detection.kind === 'node-build' || detection.kind === 'godot-project'
     let findings = collectFindings(site, built.entry)
     let { digest, reader } = buildDigest({ projectDir, site, detection, findings, hasSource })
-    const client = new ModelClient(host, active, usage)
+    const client = new ModelClient(apiOrigin(host), active, usage)
 
     const adaptations: string[] = []
     const warnings: Warning[] = built.warnings.map(message => ({ code: 'build.note', message }))

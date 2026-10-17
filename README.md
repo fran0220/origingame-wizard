@@ -130,7 +130,8 @@ instead of the stored sign-in, never written to disk), `GODOT` (path to the
 Godot editor), `CI` (fail instead of starting a browser sign-in),
 `ORIGINGAME_NO_BROWSER=1` (print the sign-in link without opening a browser),
 `ORIGINGAME_READINESS_WAIT_SECONDS` (how long to wait for the readiness check,
-default 60), `ORIGINGAME_AGENT_ORIGIN` (the Agent Service origin for
+default 60), `ORIGINGAME_API_ORIGIN` (the AI Gateway relay for model calls, default
+`https://api.<host>`), `ORIGINGAME_AGENT_ORIGIN` (the Agent Service origin for
 `--with-source`; default `https://agent.<host>`).
 
 ### In coding agents and CI

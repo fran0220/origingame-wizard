@@ -351,6 +351,19 @@ describe('sandbox mode', () => {
       platform.state.readiness422 = false
     }
   })
+
+  test('model calls go to the API relay origin, never to the Portal origin', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const relay = platform.origin.replace('127.0.0.1', 'localhost')
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: { ORIGINGAME_API_ORIGIN: relay } })
+    const run = since(m)
+    assert.equal(cli.code, 0, cli.stderr)
+    const relayed = run.requests.filter(q => q.path.startsWith('/v1/'))
+    assert.ok(relayed.length > 0, 'the run called models')
+    assert.deepEqual([...new Set(relayed.map(q => q.host))], [new URL(relay).host])
+    assert.ok(run.requests.filter(q => q.path.startsWith('/api/deploy')).every(q => q.host === new URL(platform.origin).host), 'publication stays on the Portal origin')
+  })
 })
 
 describe('failures', () => {
