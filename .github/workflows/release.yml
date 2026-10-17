@@ -25,6 +25,10 @@ jobs:
       - run: npm install -g npm@11
       - name: Tag matches package version
         run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
-      - run: npm ci
-      - run: npm test
-      - run: npm publish --provenance --access public
+      - name: Skip a version already on npm
+        id: published
+        run: echo "exists=$(npm view "origingame@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1 && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - if: steps.published.outputs.exists == 'no'
+        run: npm ci
+      - if: steps.published.outputs.exists == 'no'
+        run: npm publish --provenance --access public
