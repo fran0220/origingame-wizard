@@ -445,6 +445,9 @@ export async function startPlatform({ rulesDir }) {
       }
       if (route === 'POST /api/deploy/source-uploads') {
         const { files: entries } = JSON.parse(raw.toString())
+        // Portal's own limits (server/src/storage/source-uploads.ts): 50 MiB per file, 200 MiB in total.
+        const tooBig = entries.find(e => e.sizeBytes > 50 * 1024 * 1024)
+        if (tooBig || entries.reduce((n, e) => n + e.sizeBytes, 0) > 200 * 1024 * 1024) return json(res, 413, { error: `source upload too large${tooBig ? `: ${tooBig.path}` : ''}` })
         const sorted = [...entries].sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
         const id = `source_${randomBytes(16).toString('hex')}`
         const manifestHash = sha256(JSON.stringify({ version: 1, files: sorted }))

@@ -13,8 +13,13 @@ export const RULES_PATH = '/wizard/v1/rules.json'
 /** Identity device client this tool signs in as (shown as "Origin Wizard"). */
 export const DEVICE_CLIENT = 'wizard'
 
-/** Engines Portal accepts for `engine`. */
-export const PORTAL_ENGINES = ['html', 'threejs', 'godot'] as const
+/**
+ * Engines Portal accepts for `engine` (its catalog ids). Portal stores any
+ * other value as `html`, so an older Portal treats `unity` as `html`. Engines
+ * Portal does not list (Construct, GameMaker, Phaser …) are a *family* of the
+ * detection, shown to the person, and publish as `html`.
+ */
+export const PORTAL_ENGINES = ['html', 'threejs', 'godot', 'unity'] as const
 export type Engine = (typeof PORTAL_ENGINES)[number]
 
 /** Portal source-upload limits (server/src/storage/source-uploads.ts). */

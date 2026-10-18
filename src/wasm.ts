@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import zlib from 'node:zlib'
+
 function leb(bytes: Uint8Array, at: number): { value: number; next: number } | null {
   let value = 0
   let shift = 0
@@ -63,6 +66,37 @@ export function wasmUsesSharedMemory(bytes: Uint8Array): boolean | null {
     at = end
   }
   return false
+}
+
+/**
+ * The first bytes of a WebAssembly module, also when it is stored compressed
+ * (`.wasm.br`, `.wasm.gz`, Unity's `.wasm.unityweb`): only the start of the
+ * compressed stream is read and inflated, which is enough for the import and
+ * memory sections that `wasmUsesSharedMemory` reads.
+ */
+export function wasmHead(file: string, readBytes = 1024 * 1024): Uint8Array | null {
+  let fd: number
+  try { fd = fs.openSync(file, 'r') } catch { return null }
+  let head: Buffer
+  try {
+    head = Buffer.alloc(Math.min(fs.fstatSync(fd).size, readBytes))
+    fs.readSync(fd, head, 0, head.length, 0)
+  } finally {
+    fs.closeSync(fd)
+  }
+  if (head[0] === 0x00 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) return head
+  const gzip = head[0] === 0x1f && head[1] === 0x8b
+  const lower = file.toLowerCase()
+  const attempts: Array<() => Buffer> = []
+  if (gzip) attempts.push(() => zlib.gunzipSync(head, { finishFlush: zlib.constants.Z_SYNC_FLUSH }))
+  if (!gzip && (lower.endsWith('.br') || lower.endsWith('.unityweb'))) attempts.push(() => zlib.brotliDecompressSync(head, { finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH }))
+  for (const attempt of attempts) {
+    try {
+      const out = attempt()
+      if (out.length >= 8 && out[0] === 0x00 && out[1] === 0x61) return out
+    } catch { /* not this format */ }
+  }
+  return null
 }
 
 export const THREAD_SIGNALS: Array<[RegExp, string]> = [

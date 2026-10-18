@@ -5,8 +5,10 @@
 // The run ends by writing test-artifacts/e2e-report.json (+ the chosen artwork).
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { after, before, describe, test } from 'node:test'
 import { ACCOUNT, DEVICE_TOKEN, MODELS, imageDims, portalAccepts, startPlatform } from './fake-platform.mjs'
 import { ROOT, cleanTemp, copyFixture, runCli, sha256, signedInHome, tempDir, treeHash, treeHashExcept } from './helpers.mjs'
@@ -32,8 +34,24 @@ const LISTING = title => ({
 })
 const ARTWORK = { cover: ['cover prompt one, no text, no letters, no logo, no user interface', 'cover prompt two', 'cover prompt three'], poster: ['poster prompt one', 'poster prompt two'] }
 
+/**
+ * The edits adapt.md asks for on Unity's default template (item unity-canvas), written from the files the
+ * Wizard sent, plus one edit of the Unity loader that the Wizard must refuse (Build/ is engine output).
+ */
+function unityCanvasEdits(input) {
+  const page = input.files.find(f => f.path === 'index.html')?.text ?? ''
+  const css = input.files.find(f => f.path === 'TemplateData/style.css')?.text ?? ''
+  const edits = []
+  const sizing = /canvas\.style\.width = "960px";\n\s*canvas\.style\.height = "600px";/.exec(page)?.[0]
+  if (sizing) edits.push({ item: 'unity-canvas', path: 'index.html', find: sizing, replace: 'canvas.style.width = "100%";\n        canvas.style.height = "100%";', why: 'fill the Player frame' })
+  const centred = '#unity-container.unity-desktop { left: 50%; top: 50%; transform: translate(-50%, -50%) }'
+  if (css.includes(centred)) edits.push({ item: 'unity-canvas', path: 'TemplateData/style.css', find: centred, replace: 'html, body { width: 100%; height: 100%; overflow: hidden }\n#unity-container.unity-desktop { position: fixed; inset: 0; width: 100%; height: 100% }\n#unity-canvas { width: 100%; height: 100%; display: block }\n#unity-footer { display: none }', why: 'fill without scrollbars' })
+  edits.push({ item: 'unity-canvas', path: 'Build/Lantern.loader.js', find: 'createUnityInstance', replace: 'createUnityInstanceX', why: 'must be refused' })
+  return { edits }
+}
+
 function scriptFor(name) {
-  return ({ task, attempt }) => {
+  return ({ task, attempt, input }) => {
     if (task === 'metadata') return LISTING({ 'plain-html': 'Star Catcher', 'vite-three': 'Orbit Drift', 'godot-export': 'Lantern Keep' }[name] ?? 'Fixture')
     if (task === 'artwork') return ARTWORK
     if (name === 'plain-html' && task === 'analyze') {
@@ -77,6 +95,10 @@ function scriptFor(name) {
     }
     if ((name === 'integrate' || name === 'integrate-again') && task === 'analyze') return { summary: 'Star Catcher with scores wired.', orientation: 'landscape', items: [] }
     if (task === 'integrate') return { summary: 'Nothing to wire.', edits: [], new_files: [], methods: [] }
+    if (name === 'unity' && task === 'analyze') {
+      return { summary: 'Lantern Keep is a Unity 2D platformer: carry a lantern through a dark keep.', orientation: 'landscape', orientation_reason: 'fixed 960x600 Unity canvas', items: [], risks: [] }
+    }
+    if (name === 'unity' && task === 'adapt') return unityCanvasEdits(input)
     if (task === 'analyze') return { summary: 'A game.', orientation: 'any', items: [] }
     if (task === 'adapt') return { edits: [] }
     throw new Error(`unscripted task ${task}`)
@@ -822,5 +844,293 @@ describe('AIGCC finals (--aigcc)', () => {
     const cli = await runCli(['deploy', '--json', '--aigcc', '--credentials-file', '/nonexistent', '--source-checkpoint', 'ckpt_x'], { home: tempDir('home') })
     assert.equal(cli.code, 1)
     assert.equal(cli.result.error.code, 'invalid_arguments')
+  })
+})
+
+/** A Unity Hub install of `version` under `home` (Linux layout), whose editor is test/fake-unity.mjs. */
+function hubEditor(home, { version = '2022.3.10f1', webgl = true } = {}) {
+  const editor = path.join(home, 'Unity', 'Hub', 'Editor', version, 'Editor')
+  fs.mkdirSync(editor, { recursive: true })
+  fs.writeFileSync(path.join(editor, 'Unity'), `#!/bin/sh\nFAKE_UNITY_VERSION=${version} exec "${process.execPath}" "${path.join(ROOT, 'test', 'fake-unity.mjs')}" "$@"\n`, { mode: 0o755 })
+  if (webgl) fs.mkdirSync(path.join(editor, 'Data', 'PlaybackEngines', 'WebGLSupport'), { recursive: true })
+  return path.join(editor, 'Unity')
+}
+const records = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [])
+const sha = buffer => sha256(buffer)
+const fixtureBytes = (name, file) => fs.readFileSync(path.join(ROOT, 'fixtures', name, file))
+const inputOf = (run, task) => JSON.parse(run.chat.find(c => taskOf(c) === task).body.messages[1].content.split('INPUT:\n')[1])
+
+describe('Unity', () => {
+  test('a Decompression Fallback build (.unityweb) is published unchanged, not declared precompressed, with a warning', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-webgl')
+    for (const name of ['Lantern.data', 'Lantern.framework.js', 'Lantern.wasm']) fs.renameSync(path.join(project, 'Build', `${name}.br`), path.join(project, 'Build', `${name}.unityweb`))
+    const page = path.join(project, 'index.html')
+    fs.writeFileSync(page, fs.readFileSync(page, 'utf8').replaceAll('.br"', '.unityweb"'))
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home })
+    const run = since(m)
+    assert.equal(cli.code, 0, cli.stderr)
+    const deploy = run.deploys.at(-1)
+    assert.equal(deploy.fields.engine, 'unity')
+    assert.deepEqual(JSON.parse(deploy.files['origingame.runtime.json'].toString()), { version: 1, crossOriginIsolated: true }, 'threads found in the .unityweb wasm; nothing for the server to decode')
+    assert.equal(sha(deploy.files['Build/Lantern.wasm.unityweb']), sha(fs.readFileSync(path.join(project, 'Build', 'Lantern.wasm.unityweb'))))
+    assert.match(deploy.files['index.html'].toString(), /codeUrl: buildUrl \+ "\/Lantern\.wasm\.unityweb"/)
+    assert.ok(cli.result.warnings.some(w => w.code === 'unity.decompression_fallback'), JSON.stringify(cli.result.warnings))
+    assert.equal(inputOf(run, 'analyze').digest.findings.unity.compression, 'fallback')
+  })
+
+  test('a Brotli, multithreaded WebGL build with the PWA template: precompressed and isolated, worker off, canvas fills, binaries untouched, no wiring', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-webgl')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const beforeHash = treeHash(project)
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home })
+    const run = since(m)
+    fixtureReport('unity-webgl', cli, run, beforeHash, treeHash(project))
+    assert.equal(cli.code, 0, cli.stderr)
+    const r = cli.result
+    assert.equal(r.engine, 'unity')
+    assert.deepEqual(r.family, { id: 'unity', label: 'Unity' })
+    assert.equal(treeHash(project), beforeHash, 'project directory is byte-identical')
+    const deploy = run.deploys.at(-1)
+    assert.equal(deploy.fields.engine, 'unity', 'Portal receives its unity catalog engine')
+    assert.deepEqual(JSON.parse(deploy.files['origingame.runtime.json'].toString()), { version: 1, crossOriginIsolated: true, precompressed: true })
+    for (const binary of ['Build/Lantern.loader.js', 'Build/Lantern.data.br', 'Build/Lantern.framework.js.br', 'Build/Lantern.wasm.br', 'TemplateData/favicon.ico', 'StreamingAssets/levels.json']) {
+      assert.equal(sha(deploy.files[binary]), sha(fixtureBytes('unity-webgl', binary)), `${binary} is published unchanged`)
+    }
+    assert.equal(deploy.files['ServiceWorker.js'], undefined, 'the PWA service worker is not published')
+    assert.equal(deploy.files['manifest.webmanifest'], undefined)
+    const html = deploy.files['index.html'].toString()
+    assert.doesNotMatch(html, /serviceWorker\.register/)
+    assert.doesNotMatch(html, /rel="manifest"/)
+    assert.match(html, /canvas\.style\.width = "100%";/)
+    assert.match(html, /dataUrl: buildUrl \+ "\/Lantern\.data\.br",\n\s*frameworkUrl: buildUrl \+ "\/Lantern\.framework\.js\.br",\n\s*codeUrl: buildUrl \+ "\/Lantern\.wasm\.br",/, 'the loader config is intact')
+    assert.match(deploy.files['TemplateData/style.css'].toString(), /#unity-footer \{ display: none \}/)
+    assert.ok(r.warnings.some(w => w.code === 'adapt.skipped' && /Build\/Lantern\.loader\.js/.test(w.message)), 'an edit of the Unity loader is refused')
+    assert.equal(r.integration.applied, false)
+    assert.match(r.integration.reason, /Unity build is generated by the engine/)
+    assert.ok(!run.chat.some(c => taskOf(c) === 'integrate'), 'no integration model call')
+    // What the analysis was told: the compressed wasm was read for shared memory, and the Unity facts.
+    const digest = inputOf(run, 'analyze').digest
+    assert.deepEqual(digest.project.family, 'Unity')
+    assert.ok(digest.findings.threadReasons.includes('shared-memory:Build/Lantern.wasm.br'), digest.findings.threadReasons.join(','))
+    assert.equal(digest.findings.unity.compression, 'brotli')
+    assert.deepEqual(digest.findings.unity.fixedCanvas, { width: 960, height: 600 })
+    assert.deepEqual(digest.findings.planned.map(p => p.id).sort(), ['isolation', 'precompressed', 'unity-canvas', 'unity-service-worker'])
+    assert.equal(deploy.fields.orientation, 'landscape')
+    assert.equal(run.sessions[0].revoked, true)
+  })
+
+  test('an uncompressed build over 50 MiB is Brotli-compressed for publishing: loader config repointed, precompressed declared, bytes round-trip', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-webgl-raw')
+    // 60 MiB of data that compresses well, as Unity asset data mostly does.
+    const block = randomBytes(64 * 1024)
+    const data = Buffer.concat(Array.from({ length: 960 }, (_, i) => Buffer.concat([block.subarray(0, 4096), Buffer.from(`asset-${i}`.padEnd(60 * 1024, '.'))])))
+    fs.writeFileSync(path.join(project, 'Build', 'Orchard.data'), data)
+    const beforeHash = treeHash(project)
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), timeoutMs: 240_000 })
+    const run = since(m)
+    fixtureReport('unity-webgl-raw-packed', cli, run, beforeHash, treeHash(project))
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.equal(treeHash(project), beforeHash, 'the project keeps its uncompressed build')
+    const deploy = run.deploys.at(-1)
+    const names = Object.keys(deploy.files).filter(n => n.startsWith('Build/')).sort()
+    assert.deepEqual(names, ['Build/Orchard.data.br', 'Build/Orchard.framework.js.br', 'Build/Orchard.loader.js', 'Build/Orchard.wasm.br'])
+    assert.ok(Object.values(deploy.files).every(b => b.length <= 50 * 1024 * 1024))
+    assert.equal(sha(zlib.brotliDecompressSync(deploy.files['Build/Orchard.data.br'])), sha(data), 'the packed data decompresses to the original')
+    assert.equal(sha(zlib.brotliDecompressSync(deploy.files['Build/Orchard.wasm.br'])), sha(fixtureBytes('unity-webgl-raw', 'Build/Orchard.wasm')))
+    assert.equal(sha(deploy.files['Build/Orchard.loader.js']), sha(fixtureBytes('unity-webgl-raw', 'Build/Orchard.loader.js')), 'the loader itself stays plain')
+    const html = deploy.files['index.html'].toString()
+    assert.match(html, /dataUrl: buildUrl \+ "\/Orchard\.data\.br",/)
+    assert.match(html, /frameworkUrl: buildUrl \+ "\/Orchard\.framework\.js\.br",/)
+    assert.match(html, /codeUrl: buildUrl \+ "\/Orchard\.wasm\.br",/)
+    assert.match(html, /canvas\.style\.width = "100%";/, 'the canvas adaptation is still there')
+    assert.deepEqual(JSON.parse(deploy.files['origingame.runtime.json'].toString()), { version: 1, precompressed: true }, 'single-threaded: no isolation')
+    assert.ok(cli.result.warnings.some(w => w.code === 'unity.compressed' && /Compression Format to Brotli/.test(w.message)))
+  })
+
+  test('a build that is too large even compressed fails with Unity advice before any model call', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-webgl')
+    fs.writeFileSync(path.join(project, 'StreamingAssets', 'intro.mp4'), randomBytes(51 * 1024 * 1024))
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const run = since(m)
+    report.scenarios.unityTooLarge = { exitCode: cli.code, result: cli.result }
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'upload_failed')
+    assert.match(cli.result.error.message, /StreamingAssets\/intro\.mp4 is 51\.0 MiB/)
+    assert.match(cli.result.error.message, /texture import settings/)
+    assert.match(cli.result.error.message, /Addressables/)
+    assert.equal(run.chat.length, 0, 'no model spend')
+    assert.equal(run.deploys.length, 0)
+  })
+
+  test('a Unity project is built for WebGL by the local editor in batch mode, in a scratch copy with the build script, reusing the import cache', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-project')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    hubEditor(home, { version: '2021.3.40f1' })
+    hubEditor(home)
+    const record = path.join(tempDir('unity-record'), 'runs.jsonl')
+    const env = { FAKE_UNITY_RECORD: record, FAKE_UNITY_OUTPUT: path.join(ROOT, 'fixtures', 'unity-webgl-raw') }
+    // A real Library/ holds far more files than a source upload may (5,000): it must never count as source.
+    for (let i = 0; i < 5001; i++) {
+      const dir = path.join(project, 'Library', 'ShaderCache', String(i % 50))
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, `${i}.bin`), String(i))
+    }
+    const beforeHash = treeHash(project)
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home, env })
+    const run = since(m)
+    fixtureReport('unity-project', cli, run, beforeHash, treeHash(project))
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.equal(treeHash(project), beforeHash, 'the project (and its Library/) is byte-identical')
+    const [first] = records(record)
+    const stage = path.join(home, '.origingame', 'stage')
+    // The exact batch-mode command line, on a scratch copy that is neither the project nor the workspace.
+    const value = flag => first.argv[first.argv.indexOf(flag) + 1]
+    assert.deepEqual(first.argv, ['-batchmode', '-nographics', '-quit', '-projectPath', value('-projectPath'), '-buildTarget', 'WebGL', '-executeMethod', 'OriginGameWizardBuild.BuildWebGL', '-logFile', value('-logFile'), '-originGameOutput', value('-originGameOutput')])
+    assert.ok(value('-projectPath').startsWith(stage) && path.basename(value('-projectPath')) === 'unity-project', value('-projectPath'))
+    assert.ok(value('-logFile').startsWith(stage) && value('-originGameOutput').startsWith(stage))
+    assert.match(first.buildScript, /BuildPipeline\.BuildPlayer/)
+    assert.match(first.buildScript, /EditorBuildSettings\.scenes\.Where\(s => s\.enabled/)
+    assert.match(first.buildScript, /BuildTarget\.WebGL/)
+    assert.equal(first.asmdef, true)
+    assert.deepEqual(first.library, ['ArtifactDB', 'ShaderCache'], 'the first build starts from the project\'s own Library/')
+    assert.ok(!first.topLevel.includes('Temp') && !first.topLevel.includes('Logs'), first.topLevel.join(','))
+    assert.ok(!fs.existsSync(path.join(project, 'Assets', 'OriginGameWizard')), 'the build script never lands in the project')
+    assert.equal(first.editorVersion, '2022.3.10f1', 'the Hub editor of the project\'s exact version runs, not another installed one')
+    const r = cli.result
+    assert.equal(r.engine, 'unity')
+    assert.equal(run.deploys.at(-1).fields.engine, 'unity')
+    const deploy = run.deploys.at(-1)
+    assert.equal(sha(deploy.files['Build/Orchard.wasm']), sha(fixtureBytes('unity-webgl-raw', 'Build/Orchard.wasm')), 'the editor\'s output is what is published')
+    assert.match(deploy.files['index.html'].toString(), /canvas\.style\.width = "100%";/)
+    assert.equal(r.integration.applied, false)
+    // The C# source is analyzed (not .meta files or the caches), and the saved source leaves the caches out.
+    const digest = inputOf(run, 'analyze').digest
+    assert.ok(digest.source_files.some(f => f.path === 'Assets/Scripts/PlayerController.cs'))
+    assert.ok(!digest.source_files.some(f => /\.meta$|^Library\/|^Temp\//.test(f.path)), digest.source_files.map(f => f.path).join(','))
+    assert.equal(digest.project.unity.version, '2022.3.10f1')
+    const tree = [...platform.state.agent.commits.get(r.source.commit).tree.keys()]
+    assert.ok(tree.includes('Assets/Scripts/PlayerController.cs') && tree.includes('ProjectSettings/ProjectVersion.txt'), tree.join(','))
+    assert.ok(!tree.some(p => /^(Library|Temp|Logs)\//.test(p)), tree.join(','))
+
+    // A second run brings the import cache back instead of copying Library/ again.
+    const again = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin, '--no-source'], { home, env })
+    assert.equal(again.code, 0, again.stderr)
+    const second = records(record)[1]
+    assert.equal(second.libraryMarker, 'built\n', 'the cache from the first build is in the scratch copy')
+    assert.equal(treeHash(project), beforeHash)
+  })
+
+  test('without a matching editor or its WebGL module the run stops before any model call with the Unity Hub steps; an existing WebGL build is published instead', async () => {
+    platform.state.script = scriptFor('unity')
+    const project = copyFixture('unity-project')
+    let home = signedInHome(platform.origin, DEVICE_TOKEN)
+    hubEditor(home, { version: '6000.0.23f1' })
+    let m = mark()
+    let cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home })
+    let run = since(m)
+    report.scenarios.unityNoEditor = { exitCode: cli.code, result: cli.result }
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'build_failed')
+    for (const expected of [/Unity 2022\.3\.10f1 is not installed \(Unity Hub has 6000\.0\.23f1\)/, /Installs > Install Editor > Archive/, /unityhub:\/\/2022\.3\.10f1\/ff3792e53c62/, /Web Build Support/, /UNITY=\/path\/to\/Unity/]) assert.match(cli.result.error.message, expected)
+    assert.equal(run.chat.length, 0)
+    assert.equal(run.sessions[0].revoked, true)
+
+    home = signedInHome(platform.origin, DEVICE_TOKEN)
+    hubEditor(home, { webgl: false })
+    cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home })
+    report.scenarios.unityNoWebgl = { exitCode: cli.code, result: cli.result }
+    assert.equal(cli.result.error.code, 'build_failed')
+    assert.match(cli.result.error.message, /has no WebGL Build Support module/)
+    assert.match(cli.result.error.message, /Installs > 2022\.3\.10f1 > the gear \(Manage\) > Add modules/)
+
+    home = signedInHome(platform.origin, DEVICE_TOKEN)
+    hubEditor(home)
+    cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home, env: { FAKE_UNITY_MODE: 'license', FAKE_UNITY_RECORD: path.join(tempDir('rec'), 'r.jsonl') } })
+    assert.equal(cli.result.error.code, 'build_failed')
+    assert.match(cli.result.error.message, /activated license/)
+
+    // No editor, but a WebGL build in the tree: that build is published, with a warning.
+    fs.cpSync(path.join(ROOT, 'fixtures', 'unity-webgl'), path.join(project, 'Builds', 'WebGL'), { recursive: true })
+    home = signedInHome(platform.origin, DEVICE_TOKEN)
+    m = mark()
+    cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home })
+    run = since(m)
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.ok(cli.result.warnings.some(w => w.code === 'build.note' && /existing WebGL build in Builds\/WebGL\//.test(w.message)), JSON.stringify(cli.result.warnings))
+    assert.equal(sha(run.deploys.at(-1).files['Build/Lantern.wasm.br']), sha(fixtureBytes('unity-webgl', 'Build/Lantern.wasm.br')))
+  })
+
+  test('a Windows build beside its Unity project is traced back to the project and built for the Web; --prebuilt of it too', async () => {
+    platform.state.script = scriptFor('unity')
+    const root = copyFixture('unity-native')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    hubEditor(home)
+    const record = path.join(tempDir('unity-record'), 'runs.jsonl')
+    const env = { FAKE_UNITY_RECORD: record, FAKE_UNITY_OUTPUT: path.join(ROOT, 'fixtures', 'unity-webgl-raw') }
+    const beforeHash = treeHash(root)
+    let m = mark()
+    let cli = await runCli(['deploy', '--dir', path.join(root, 'Windows'), '--yes', '--json', '--host', platform.origin, '--no-source'], { home, env })
+    let run = since(m)
+    report.scenarios.unityNative = { exitCode: cli.code, result: cli.result }
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.match(cli.stderr, /windows build \(unity\): Orchard Run\.exe; OriginGame publishes Web builds, so the Unity project it came from \(.*Project\) is built for the Web instead/)
+    assert.equal(cli.result.engine, 'unity')
+    assert.equal(records(record).length, 1, 'the editor ran once, on the project')
+    assert.ok(!Object.keys(run.deploys.at(-1).files).some(f => /\.exe$|\.dll$|_Data\//.test(f)), 'nothing of the Windows build is uploaded')
+    assert.equal(treeHash(root), beforeHash)
+
+    m = mark()
+    cli = await runCli(['deploy', '--dir', root, '--prebuilt', path.join(root, 'Windows'), '--yes', '--json', '--host', platform.origin, '--no-source'], { home, env })
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.match(cli.stderr, /--prebuilt .*Windows: windows build \(unity\)/)
+    assert.equal(records(record).length, 2)
+  })
+
+  test('a Windows build with no project near it fails before sign-in spend with what to do in Unity', async () => {
+    const lone = path.join(tempDir('lone'), 'Orchard Run Windows')
+    fs.cpSync(path.join(ROOT, 'fixtures', 'unity-native', 'Windows'), lone, { recursive: true })
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', lone, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const run = since(m)
+    report.scenarios.unityNativeAlone = { exitCode: cli.code, result: cli.result }
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'detect_failed')
+    const message = cli.result.error.message
+    assert.match(message, /holds a Windows build of a Unity game \(Orchard Run\.exe\)\./)
+    assert.match(message, /OriginGame publishes Web builds only, so an \.exe cannot be uploaded\./)
+    assert.match(message, /No Unity project was found near it/)
+    assert.match(message, /File > Build Settings > WebGL/)
+    assert.match(message, /run npx origingame in the Unity project folder \(the one with Assets\/ and ProjectSettings\/\)/)
+    assert.equal(run.sessions.length, 0, 'no session was issued')
+    assert.equal(run.deploys.length, 0)
+  })
+})
+
+describe('other engines', () => {
+  test('a Construct 3 export one folder down is published from its own root as engine html, labeled, without wiring', async () => {
+    platform.state.script = scriptFor('construct')
+    const project = copyFixture('engines/construct3')
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin, '--no-source'], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const run = since(m)
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.equal(cli.result.engine, 'html')
+    assert.deepEqual(cli.result.family, { id: 'construct3', label: 'Construct 3' })
+    const deploy = run.deploys.at(-1)
+    assert.equal(deploy.fields.engine, 'html')
+    assert.deepEqual(Object.keys(deploy.files).sort(), ['data.json', 'index.html', 'scripts/c3runtime.js', 'scripts/main.js', 'sw.js'])
+    assert.match(cli.result.integration.reason, /Construct 3 export is generated by the engine/)
+    assert.match(cli.stderr, /Construct 3 Web export in exports\/web/)
   })
 })

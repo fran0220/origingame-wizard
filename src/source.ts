@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { SOURCE_LIMITS, VERSION } from './constants.js'
 import { WizardError } from './errors.js'
-import { walkTracked } from './gitignore.js'
+import { UNITY_IGNORE, walkTracked } from './gitignore.js'
 import { describe, errorCode, request, type HttpResponse } from './http.js'
 import { sha256 } from './files.js'
 import { findSecrets, isSecretFile } from './secrets.js'
@@ -57,7 +57,8 @@ function validPath(file: string): boolean {
 
 /** What the source upload would send, checked against the limits before anything is sent. */
 export function planSource(projectDir: string): SourcePlan {
-  const walked = walkTracked(projectDir, SKIP)
+  const unity = fs.existsSync(path.join(projectDir, 'ProjectSettings', 'ProjectVersion.txt'))
+  const walked = walkTracked(projectDir, SKIP, unity ? UNITY_IGNORE : [])
   const files: SourceFile[] = []
   const withheld: Withheld[] = walked.links.map(p => ({ path: p, reason: 'symbolic link' }))
   let totalBytes = 0

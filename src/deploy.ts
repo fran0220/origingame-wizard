@@ -7,10 +7,10 @@ import { makeArtwork } from './artwork.js'
 import { buildProject } from './build.js'
 import { onCleanup } from './cleanup.js'
 import { AGENT_CLIENT, DEFAULT_HOST, type Engine } from './constants.js'
-import { classifyEngine, detectProject, type Detection } from './detect.js'
+import { classifyEngine, classifyFamily, detectProject, UNITY_CACHE_DIRS, type Detection } from './detect.js'
 import { buildDigest, ContextReader } from './digest.js'
 import { WizardError } from './errors.js'
-import { isTextFile, listFiles, readText } from './files.js'
+import { isTextFile, listFiles, projectSkip, readText } from './files.js'
 import { collectFindings, type PlanItem } from './findings.js'
 import { CONSENT_VERSION, forgetGame, freshStage, hasConsented, projectKey, recordConsent, rememberedGame, rememberGame } from './home.js'
 import { integrate, type IntegrationResult } from './integrate.js'
@@ -27,6 +27,8 @@ import { checkPortalLimits, precheckPortalLimits, stageCopy, stageManifest } fro
 import { ADAPT_SCHEMA, analyze, mergePlan, metadataSchema, type Edit, type Metadata } from './tasks.js'
 import type { Telemetry } from './telemetry.js'
 import { automatic, type Ui } from './ui.js'
+import { apkEngine, findSourceProject, nativeMessage } from './native.js'
+import { applyPack, compressPlanned, packedFits, planPack, unityBuildIn, unitySizeAdvice } from './unity.js'
 import { commitWorkspace, headOf, prepareWorkspace, PUBLISH_BRANCH, resetWorkspace, type Commit } from './workspace.js'
 
 export interface Warning { code: string; message: string; path?: string }
@@ -45,6 +47,8 @@ export interface DeployResult {
   readiness: Record<string, unknown>
   warnings: Warning[]
   engine: Engine
+  /** The game family named to the person ("Unity", "Construct 3", "Phaser"); `engine` is what Portal received. */
+  family: { id: string; label: string } | null
   stageSha256: string
   rulesVersion: string
   adaptations: string[]
@@ -61,23 +65,61 @@ export interface DeployResult {
 
 const SKIP_SCAN = new Set(['node_modules', '.git', '.godot', '.import', '.svn', '.hg', '.cache', '.vite', '.next'])
 
-function detect(projectDir: string, rules: Rules, prebuilt: string | undefined): Detection {
-  const projectFiles = fs.existsSync(projectDir) ? listFiles(projectDir, SKIP_SCAN) : []
-  const readFrom = (root: string) => (file: string) => readText(path.join(root, file), 512 * 1024)
-  const project = detectProject({ files: projectFiles, read: readFrom(projectDir), engines: rules.engines })
+interface Chosen { projectDir: string; detection: Detection; prebuilt: string | undefined }
+
+function scan(dir: string, rules: Rules): Detection | null {
+  const files = fs.existsSync(dir) ? listFiles(dir, projectSkip(dir, SKIP_SCAN, UNITY_CACHE_DIRS)) : []
+  return detectProject({ files, read: file => readText(path.join(dir, file), 512 * 1024), engines: rules.engines, families: rules.families })
+}
+
+/**
+ * A native build is never published. A Unity or Godot one is traced back to
+ * the project it came from (the folder, its parents, their siblings), which is
+ * built for the Web instead; anything else fails with how to export for the Web.
+ */
+function fromNative(dir: string, native: Detection, rules: Rules, via: string | null): Chosen {
+  const info = native.native!
+  const buildDir = path.join(dir, native.root)
+  const engine = info.engine ?? (info.platform === 'android' ? apkEngine(path.join(dir, info.evidence[0]!)) : null)
+  const traced = engine === 'unity' || engine === 'godot' ? findSourceProject(buildDir, engine) : { dir: null, looked: [] }
+  if (traced.dir) {
+    const project = scan(traced.dir, rules)
+    if (project && (project.kind === 'unity-project' || project.kind === 'godot-project')) {
+      const label = engine === 'unity' ? 'Unity' : 'Godot'
+      project.reasons.unshift(`${via ? `${via}: ` : ''}${native.reasons.at(-1)}; OriginGame publishes Web builds, so the ${label} project it came from (${traced.dir}) is built for the Web instead`)
+      return { projectDir: traced.dir, detection: project, prebuilt: undefined }
+    }
+  }
+  throw new WizardError('detect_failed', nativeMessage(via ? `${via} (${buildDir})` : buildDir, { ...info, engine: engine ?? info.engine }, traced.looked))
+}
+
+function detect(projectDir: string, rules: Rules, prebuilt: string | undefined): Chosen {
+  const project = scan(projectDir, rules)
   if (!prebuilt) {
     if (!project) {
-      throw new WizardError('detect_failed', `no web game found in ${projectDir}: expected an index.html, a package.json with a build script, a Godot project or a Godot Web export (or pass --prebuilt <dir>)`)
+      throw new WizardError('detect_failed', `no game found in ${projectDir}: expected a Web build (an index.html, a Unity WebGL or Godot Web export, an engine's HTML5 export), a package.json with a build script, a Unity project or a Godot project (or pass --prebuilt <dir>)`)
     }
-    return project
+    if (project.kind === 'native') return fromNative(projectDir, project, rules, null)
+    return { projectDir, detection: project, prebuilt }
   }
   const dir = path.resolve(prebuilt)
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new WizardError('detect_failed', `--prebuilt ${prebuilt} is not a directory`)
+  const inside = scan(dir, rules)
+  if (inside?.kind === 'native') return fromNative(dir, inside, rules, `--prebuilt ${prebuilt}`)
+  if (inside?.kind === 'unity-webgl') {
+    // A Unity WebGL build, possibly one level down (`--prebuilt Builds` holding `WebGL/`): publish that folder.
+    return { projectDir, detection: { ...inside, root: '', reasons: [`--prebuilt ${prebuilt}`, ...inside.reasons] }, prebuilt: path.join(dir, inside.root) }
+  }
   const files = listFiles(dir, SKIP_SCAN)
-  const fromBuild = classifyEngine(files, readFrom(dir), rules.engines)
-  const engine: Engine = project && project.engine !== 'html' ? project.engine : fromBuild.engine
+  const read = (file: string) => readText(path.join(dir, file), 512 * 1024)
+  const fromBuild = classifyEngine(files, read, rules.engines)
+  const familyHit = classifyFamily(files, read, rules.families)
+  const family = project?.family ?? (familyHit ? { id: familyHit.family.id, label: familyHit.family.label, generated: familyHit.family.generated } : null)
+  let engine: Engine = project && project.engine !== 'html' ? project.engine : fromBuild.engine
+  if (engine === 'html' && familyHit && familyHit.family.engine !== 'html') engine = familyHit.family.engine
   const pages = files.filter(f => !f.includes('/') && /\.html?$/i.test(f))
   const entry = files.includes('index.html') ? 'index.html' : pages.length === 1 ? pages[0]! : 'index.html'
-  return { kind: 'prebuilt', engine, root: '', entry, outputs: [], reasons: [`--prebuilt ${prebuilt}`, ...(project?.reasons ?? [])] }
+  return { projectDir, prebuilt, detection: { kind: 'prebuilt', engine, family, root: '', entry, outputs: [], reasons: [`--prebuilt ${prebuilt}`, ...(project?.reasons ?? [])] } }
 }
 
 const CONSENT_TEXT = (rules: Rules) => [
@@ -133,65 +175,109 @@ const INTRO = [
   'to your private repository, writes the listing, draws a cover and a poster, and publishes it. The platform pays for the models.',
 ].join('\n')
 
-const ENGINE_NAMES: Record<Engine, string> = { html: 'HTML', threejs: 'three.js', godot: 'Godot' }
+const ENGINE_NAMES: Record<Engine, string> = { html: 'HTML', threejs: 'three.js', godot: 'Godot', unity: 'Unity' }
 
-/** What was found, in words: "Vite + three.js project", "HTML game", "Godot Web export". */
+/** What was found, in words: "Vite + three.js project", "HTML game", "Godot Web export", "Construct 3 Web export". */
 function kindLabel(d: Detection): string {
-  const engine = ENGINE_NAMES[d.engine]
+  const engine = d.family && d.engine === 'html' ? d.family.label : ENGINE_NAMES[d.engine]
   switch (d.kind) {
     case 'node-build': {
       const script = d.build?.script ?? ''
       const bundler = /\bvite\b/.test(script) ? 'Vite' : /\bwebpack\b/.test(script) ? 'webpack' : /\bparcel\b/.test(script) ? 'Parcel' : 'Node'
-      return `${bundler}${d.engine === 'html' ? '' : ` + ${engine}`} project`
+      return `${bundler}${d.engine === 'html' && !d.family ? '' : ` + ${engine}`} project`
     }
     case 'godot-project': return 'Godot project'
     case 'godot-export': return 'Godot Web export'
-    case 'prebuilt': return `built ${engine} game`
-    default: return `${engine} game`
+    case 'unity-project': return `Unity project${d.unity?.version ? ` (Unity ${d.unity.version})` : ''}`
+    case 'unity-webgl': return 'Unity WebGL build'
+    case 'prebuilt': return d.family?.generated ? `${engine} Web export` : `built ${engine} game`
+    default: return d.family?.generated ? `${engine} Web export` : `${engine} game`
   }
 }
 
+/** Why the score and save wiring cannot apply, or null when it can. */
+function noIntegration(d: Detection): string | null {
+  if (d.kind === 'unity-project' || d.kind === 'unity-webgl' || d.engine === 'unity') return 'a Unity build is generated by the engine: its JavaScript cannot be edited meaningfully, so scores and saves are not wired'
+  if (d.engine === 'godot' || d.kind === 'godot-export') return 'the project has no web source code (HTML or JavaScript/TypeScript) to wire'
+  if (d.family?.generated) return `a ${d.family.label} export is generated by the engine, so there is no web source code to wire`
+  if (d.kind === 'prebuilt') return 'the project has no web source code (HTML or JavaScript/TypeScript) to wire'
+  return null
+}
+
 const MiB = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MiB`
+
+/**
+ * Portal's limits, checked right after staging and before any model spend. An
+ * uncompressed Unity build that is too large is compressed (into a cache, the
+ * staged copy is unchanged until `pack`) to see whether it would fit.
+ */
+async function precheck(site: string, entry: string, cache: string, ui: Ui): Promise<void> {
+  const page = fs.existsSync(path.join(site, 'index.html')) ? 'index.html' : entry
+  const unity = unityBuildIn(site, page)
+  const plan = unity ? planPack(site, page) : null
+  if (plan && 'refused' in plan) throw new WizardError('upload_failed', `the Unity build is over OriginGame's limits and ${plan.refused}. ${unitySizeAdvice(unity)}`)
+  if (plan) {
+    const s = ui.spinner(`The Unity build is uncompressed and too large (${plan.reason}); checking whether Brotli compression makes it fit`)
+    const packed = await compressPlanned(site, plan, cache)
+    const still = packedFits(site, packed)
+    if (still) { s.fail('Too large even compressed'); throw new WizardError('upload_failed', `${still}. ${unitySizeAdvice(unity)}`) }
+    s.stop(`Compressed with Brotli it fits (${MiB([...packed.values()].reduce((n, p) => n + p.bytes, 0))} for ${plan.files.length} build files); it is compressed for publishing`)
+    return
+  }
+  try {
+    precheckPortalLimits(site)
+  } catch (error) {
+    if (unity && error instanceof WizardError && /MiB/.test(error.message)) throw new WizardError('upload_failed', `${error.message}. ${unitySizeAdvice(unity)}`)
+    throw error
+  }
+}
 
 /**
  * Step 1: the folder and what to publish from it. Interactive runs confirm
  * the detection, may point at another folder, and choose between building and
  * an output that is already there; other runs take the detection as is.
  */
-async function chooseProject(options: Options, ui: Ui, rules: Rules): Promise<{ projectDir: string; detection: Detection; prebuilt: string | undefined }> {
+async function chooseProject(options: Options, ui: Ui, rules: Rules): Promise<Chosen> {
   let dir = path.resolve(options.dir)
   let prebuilt = options.prebuilt
   for (;;) {
-    let detection: Detection | null = null
+    let chosen: Chosen | null = null
     let failure: WizardError | null = null
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) failure = new WizardError('detect_failed', `${dir} is not a directory`)
     else {
-      try { detection = detect(dir, rules, prebuilt) } catch (error) {
+      try { chosen = detect(dir, rules, prebuilt) } catch (error) {
         if (!(error instanceof WizardError)) throw error
         failure = error
       }
     }
     if (!ui.interactive) {
-      if (!detection) throw failure!
-      ui.step(`Detected ${detection.kind} (${detection.engine}): ${detection.reasons.join('; ')}`)
-      return { projectDir: dir, detection, prebuilt }
+      if (!chosen) throw failure!
+      const d = chosen.detection
+      ui.step(`Detected ${d.kind} (${d.engine}${d.family && d.family.id !== d.engine ? `, ${d.family.label}` : ''}): ${d.reasons.join('; ')}`)
+      return chosen
     }
-    if (detection) {
+    if (chosen) {
+      let { detection } = chosen
       ui.info(`Detected ${detection.reasons.join('; ')}`)
-      const where = dir === process.cwd() ? 'this folder' : dir
+      const where = chosen.projectDir === process.cwd() ? 'this folder' : chosen.projectDir
       if (await ui.confirm(`Found a ${kindLabel(detection)} in ${where}. Publish this project?`, true)) {
-        const ready = detection.kind === 'node-build' && !prebuilt ? detection.outputs.find(o => fs.existsSync(path.join(dir, o, 'index.html'))) : undefined
+        const ready = detection.kind === 'node-build' && !chosen.prebuilt ? detection.outputs.find(o => fs.existsSync(path.join(chosen!.projectDir, o, 'index.html'))) : undefined
         if (ready) {
           const how = await ui.select<string>('It is already built. What should be published?', [
             { value: '', label: `Build it again first with ${detection.build?.packageManager ?? 'npm'} run build (Recommended)` },
             { value: ready, label: `Publish ${ready}/ as it is` },
           ], '')
-          if (how) {
-            prebuilt = path.join(dir, how)
-            detection = detect(dir, rules, prebuilt)
-          }
+          if (how) return detect(chosen.projectDir, rules, path.join(chosen.projectDir, how))
         }
-        return { projectDir: dir, detection, prebuilt }
+        const existing = detection.kind === 'unity-project' ? detection.existingExport : undefined
+        if (existing) {
+          const how = await ui.select<string>('It has a WebGL build already. What should be published?', [
+            { value: '', label: 'Build it again with your Unity Editor first (Recommended; it can take a while)' },
+            { value: existing.root, label: `Publish the WebGL build in ${existing.root || '.'}/ as it is` },
+          ], '')
+          if (how) detection = { ...detection, kind: 'unity-webgl', root: how, entry: existing.entry, existingExport: undefined, reasons: [...detection.reasons, `the existing WebGL build in ${how}/, as chosen`] }
+        }
+        return { ...chosen, detection }
       }
     } else {
       ui.warn(failure!.message)
@@ -283,7 +369,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
 
     // 1. The project.
     const { projectDir, detection, prebuilt } = await chooseProject(options, ui, rules)
-    telemetry.track('detected', { kind: detection.kind, engine: detection.engine })
+    telemetry.track('detected', { kind: detection.kind, engine: detection.engine, ...(detection.family ? { family: detection.family.id } : {}) })
 
     // 2. Sign-in and session.
     let portalAuth: PortalAuth
@@ -351,7 +437,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
 
     // 6. Score and save integration: on by default, since it only ever lands on the workspace.
-    const canIntegrate = detection.engine !== 'godot' && detection.kind !== 'godot-export' && detection.kind !== 'prebuilt'
+    const cannotIntegrate = noIntegration(detection)
+    const canIntegrate = cannotIntegrate === null
     let integrating = options.integrate && canIntegrate
     if (integrating && ui.interactive) {
       integrating = await ui.confirm(`Wire leaderboards and cloud saves into the code? It happens on the ${PUBLISH_BRANCH} branch (or a copy), never in your folder; you will see the diff.`, true)
@@ -374,12 +461,24 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     let codeEdits: Edit[] = []
     let codeFiles = new Set<string>()
     const prepare = async () => {
-      const built = await buildProject(work, detection, stageDir, ui, prebuiltDir)
+      const built = await buildProject(work, detection, stageDir, ui, prebuiltDir, projectDir)
       for (const w of built.warnings) ui.warn(w)
       const staged = stageCopy(built.outputDir, site)
       if (staged.excluded.length) ui.info(`Left out of the upload: ${staged.excluded.slice(0, 8).map(e => `${e.path} (${e.reason})`).join(', ')}${staged.excluded.length > 8 ? ` and ${staged.excluded.length - 8} more` : ''}`)
-      precheckPortalLimits(site)
+      await precheck(site, built.entry, packCache, ui)
       return built
+    }
+    const packCache = path.join(stageDir, 'pack')
+    /** Brotli for an uncompressed Unity build that is over the limits: the last step before the manifest, never mirrored to the workspace. */
+    const pack = async (entry: string) => {
+      const page = fs.existsSync(path.join(site, 'index.html')) ? 'index.html' : entry
+      const plan = planPack(site, page)
+      if (!plan || 'refused' in plan) return
+      const s = ui.spinner(`Compressing the Unity build with Brotli (${plan.reason}; OriginGame accepts 50 MiB per file, 200 MiB in total)`)
+      const done = applyPack(site, page, plan, await compressPlanned(site, plan, packCache))
+      s.stop(`Compressed ${plan.files.length} Unity build file${plan.files.length === 1 ? '' : 's'} with Brotli`)
+      adaptations.push(...done)
+      if (!warnings.some(w => w.code === 'unity.compressed')) warnings.push({ code: 'unity.compressed', message: `the Unity build was too large uncompressed (${plan.reason}); the Wizard Brotli-compressed ${plan.files.map(f => f.path).join(', ')} for this release. Set Player Settings > Publishing Settings > Compression Format to Brotli to ship it that way yourself.` })
     }
     const replay = (built: Awaited<ReturnType<typeof prepare>>) => {
       applyItems(site, chosen, built.entry)
@@ -387,8 +486,9 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
     let built = await prepare()
     for (const message of built.warnings) warnings.push({ code: 'build.note', message })
-    const hasSource = detection.kind === 'node-build' || detection.kind === 'godot-project'
+    const hasSource = detection.kind === 'node-build' || detection.kind === 'godot-project' || detection.kind === 'unity-project'
     let findings = collectFindings(site, built.entry)
+    if (findings.unity?.compression === 'fallback') warnings.push({ code: 'unity.decompression_fallback', message: 'the Unity build uses Decompression Fallback (.unityweb), so every player\'s browser decompresses it in JavaScript before the game starts; turn Player Settings > Publishing Settings > Decompression Fallback off and rebuild for a faster start (OriginGame serves Brotli and gzip builds with their Content-Encoding)' })
     let { digest, reader } = buildDigest({ projectDir: work, site, detection, findings, hasSource })
     const client = new ModelClient(apiOrigin(host), active, usage)
     const adaptations: string[] = []
@@ -444,7 +544,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     const adaptedHead = headOf(ws)
 
     // 8. Integration on the workspace, committed on its own so it can be dropped.
-    let integration: DeployResult['integration'] = { applied: false, reason: canIntegrate ? (options.integrate ? 'declined' : 'turned off with --no-integrate') : 'the project has no web source code to wire' }
+    let integration: DeployResult['integration'] = { applied: false, reason: cannotIntegrate ?? (options.integrate ? 'declined' : 'turned off with --no-integrate') }
     let undo: IntegrationResult['undo'] = []
     if (integrating) {
       const result = await integrate(client, rules, ui, { projectDir: work, stageDir, detection, digest, reader, where })
@@ -469,6 +569,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
     const orientation = chosen.find(i => i.kind === 'orientation')?.value ?? 'any'
 
+    await pack(built.entry)
     let manifest = stageManifest(site)
     checkPortalLimits(manifest)
     warnings.push(...await secretWarnings(site, ui))
@@ -609,6 +710,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       else for (const u of [...undo].reverse()) { if (u.before === null) fs.rmSync(u.file, { force: true }); else fs.writeFileSync(u.file, u.before) }
       built = await prepare()
       replay(built)
+      await pack(built.entry)
       manifest = stageManifest(site)
       checkPortalLimits(manifest)
       outcome = await publishOnce(outcome ? outcome.published.gameId : gameId)
@@ -633,7 +735,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       ok: true, action, ...published,
       title: metadata?.title ?? options.title?.trim() ?? null,
       playUrl: String(body.playUrl ?? ''), portalUrl: String(body.portalUrl ?? ''),
-      readiness, warnings, engine: detection.engine, stageSha256: manifest.hash, rulesVersion: rules.version, adaptations,
+      readiness, warnings, engine: detection.engine, family: detection.family ? { id: detection.family.id, label: detection.family.label } : null, stageSha256: manifest.hash, rulesVersion: rules.version, adaptations,
       usage: { sessionId: active.session_id, quota: active.budget_quota, ...usage },
       source, workspace, integration, aigcc,
     }

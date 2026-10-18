@@ -12,13 +12,56 @@ export interface ImageRule {
   candidates: number
 }
 
+/**
+ * A game family: an engine or framework the Wizard names to the person
+ * ("Construct 3", "Unity", "Phaser") while Portal receives `engine`, one of
+ * its catalog ids. Served under `families`, a key Wizard 0.1–0.3 ignore: those
+ * versions refuse the whole document when `engines` names an id they do not
+ * know, so `engines` keeps only `html`, `threejs` and `godot`.
+ */
+export interface Family {
+  id: string
+  label: string
+  /** The Portal engine id this family publishes as (`html` when Portal has none of its own). */
+  engine: Engine
+  /** Same syntax as engine markers; a part with a `/` matches a path relative to the scanned root. */
+  markers: string[]
+  /** The published files are an engine's generated export, not hand-written source: no score/save wiring. */
+  generated: boolean
+  /** A matching marker also locates the export's root directory inside a larger folder. */
+  locate: boolean
+}
+
 export interface Rules {
   version: string
   models: { analyze: string; deep: string; image: string }
   images: { cover: ImageRule; poster: ImageRule }
   prompts: { system: string; analyze: string; adapt: string; metadata: string; artwork: string }
   engines: Array<{ id: Engine; markers: string[] }>
+  families: Family[]
   genres: string[]
+}
+
+const FAMILY_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
+
+/**
+ * `families` is optional and read leniently, so the document can grow without
+ * breaking this version: a malformed entry is skipped, and an engine this
+ * version does not know publishes as `html`.
+ */
+export function parseFamilies(value: unknown): Family[] {
+  if (!Array.isArray(value)) return []
+  const out: Family[] = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue
+    const f = raw as Record<string, unknown>
+    if (typeof f.id !== 'string' || !FAMILY_ID.test(f.id) || out.some(x => x.id === f.id)) continue
+    if (!Array.isArray(f.markers) || !f.markers.length || f.markers.some(m => typeof m !== 'string' || !m)) continue
+    const label = typeof f.label === 'string' && f.label.trim() ? f.label.trim().slice(0, 60) : f.id
+    const engine = (PORTAL_ENGINES as readonly string[]).includes(f.engine as string) ? f.engine as Engine : 'html'
+    out.push({ id: f.id, label, engine, markers: f.markers as string[], generated: f.generated === true, locate: f.locate === true })
+  }
+  return out
 }
 
 const SIZE = /^(\d{2,5})x(\d{2,5})$/
@@ -70,6 +113,7 @@ export function validateRules(value: any): Rules {
       artwork: str(prompts.artwork, 'prompts.artwork'),
     },
     engines: parsedEngines,
+    families: parseFamilies(value.families),
     genres,
   }
 }

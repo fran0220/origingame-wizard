@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { listFiles, readText } from './files.js'
-import { THREAD_SIGNALS, wasmUsesSharedMemory } from './wasm.js'
+import { readRuntime, RUNTIME_FILE, unityBuildIn, type UnityBuild } from './unity.js'
+import { THREAD_SIGNALS, wasmHead, wasmUsesSharedMemory } from './wasm.js'
 
 /**
  * Adaptations the Wizard knows how to apply to the staged copy. The model
@@ -12,6 +13,7 @@ export const ITEM_KINDS = [
   'strip_platform_config',
   'relative_paths',
   'cross_origin_isolation',
+  'precompressed',
   'remove_service_worker',
   'exclude_files',
   'code_edit',
@@ -45,6 +47,10 @@ export interface Findings {
   serviceWorkerRegistrations: string[]
   orientationHints: string[]
   largeFiles: string[]
+  /** A Unity WebGL build at the release root: its loader, build files and compression, canvas and service worker. */
+  unity: UnityBuild | null
+  /** The release's `origingame.runtime.json` as it is now (`invalid` when it cannot be read). */
+  runtime: Record<string, unknown> | null | 'invalid'
 }
 
 const HTML_ATTR = /\b(src|href|poster|data-src|content)\s*=\s*(["'])(\/[^"'/][^"']*)\2/gi
@@ -82,7 +88,9 @@ export function collectFindings(site: string, entry: string): Findings {
   const present = new Set(files)
   const exists = (p: string) => present.has(p)
   const items: PlanItem[] = []
-  const findings: Findings = { items, scriptAbsolute: [], threadReasons: [], externalOrigins: [], localhostRefs: [], serviceWorkerRegistrations: [], orientationHints: [], largeFiles: [] }
+  const unity = unityBuildIn(site, present.has('index.html') ? 'index.html' : entry)
+  const runtime = readRuntime(site)
+  const findings: Findings = { items, scriptAbsolute: [], threadReasons: [], externalOrigins: [], localhostRefs: [], serviceWorkerRegistrations: [], orientationHints: [], largeFiles: [], unity, runtime }
   const external = new Set<string>()
 
   if (!present.has('index.html')) {
@@ -98,12 +106,9 @@ export function collectFindings(site: string, entry: string): Findings {
     const size = fs.statSync(absolute).size
     if (size > 25 * 1024 * 1024) findings.largeFiles.push(`${file} (${(size / 1048576).toFixed(1)} MiB)`)
     const ext = path.extname(file).toLowerCase()
-    if (ext === '.wasm') {
-      const fd = fs.openSync(absolute, 'r')
-      const head = Buffer.alloc(Math.min(size, 1024 * 1024))
-      fs.readSync(fd, head, 0, head.length, 0)
-      fs.closeSync(fd)
-      if (wasmUsesSharedMemory(head)) findings.threadReasons.push(`shared-memory:${file}`)
+    if (/\.wasm(\.(br|gz|unityweb))?$/i.test(file)) {
+      const head = wasmHead(absolute)
+      if (head && wasmUsesSharedMemory(head)) findings.threadReasons.push(`shared-memory:${file}`)
       continue
     }
     if (!['.html', '.htm', '.css', '.js', '.mjs'].includes(ext)) continue
@@ -120,7 +125,7 @@ export function collectFindings(site: string, entry: string): Findings {
     if (ext !== '.js' && ext !== '.mjs') htmlRefs.push(...absoluteRefs(file, text, exists))
     if (ext !== '.css') {
       for (const [pattern, reason] of THREAD_SIGNALS) if (pattern.test(text)) findings.threadReasons.push(`${reason}:${file}`)
-      if (/navigator\.serviceWorker\.register\(/.test(text) && !godotSw) findings.serviceWorkerRegistrations.push(file)
+      if (/navigator\.serviceWorker\.register\(/.test(text) && !godotSw && unity?.serviceWorker?.file !== file) findings.serviceWorkerRegistrations.push(file)
       for (const m of text.matchAll(LOCALHOST)) if (findings.localhostRefs.length < 10) findings.localhostRefs.push(`${file}: ${m[0]}`)
       for (const m of text.matchAll(EXTERNAL)) external.add(m[1]!.toLowerCase())
       for (const m of text.matchAll(/(?:width|height)\s*[:=]\s*(\d{3,4})\b/g)) if (findings.orientationHints.length < 12 && ext !== '.html') findings.orientationHints.push(`${file}: ${m[0]}`)
@@ -144,8 +149,21 @@ export function collectFindings(site: string, entry: string): Findings {
     const sample = htmlRefs.slice(0, 4).map(r => `${r.file}: ${r.value}`).join('; ')
     items.push({ id: 'relative-paths', kind: 'relative_paths', title: `Make ${htmlRefs.length} root-absolute path${htmlRefs.length === 1 ? '' : 's'} relative`, reason: `a release is served under /play/<game>/<release>/, so "/…" points outside it (${sample})`, recommended: true, paths: [...new Set(htmlRefs.map(r => r.file))], source: 'check' })
   }
-  if (findings.threadReasons.length && !present.has('origingame.runtime.json')) {
-    items.push({ id: 'isolation', kind: 'cross_origin_isolation', title: 'Declare cross-origin isolation (threads / SharedArrayBuffer)', reason: `the build needs SharedArrayBuffer: ${findings.threadReasons.slice(0, 3).join(', ')}; writes origingame.runtime.json so Portal sends COOP/COEP for this release only`, recommended: true, source: 'check' })
+  const declared = (field: string) => runtime !== null && runtime !== 'invalid' && runtime[field] === true
+  if (findings.threadReasons.length && !declared('crossOriginIsolated') && runtime !== 'invalid') {
+    items.push({ id: 'isolation', kind: 'cross_origin_isolation', title: 'Declare cross-origin isolation (threads / SharedArrayBuffer)', reason: `the build needs SharedArrayBuffer: ${findings.threadReasons.slice(0, 3).join(', ')}; ${runtime ? `adds crossOriginIsolated to ${RUNTIME_FILE}` : `writes ${RUNTIME_FILE}`} so Portal sends COOP/COEP for this release only`, recommended: true, source: 'check' })
+  }
+  if (unity && (unity.compression === 'brotli' || unity.compression === 'gzip') && !declared('precompressed') && runtime !== 'invalid') {
+    const compressed = unity.files.filter(f => f.compression === 'br' || f.compression === 'gz').map(f => f.path)
+    items.push({ id: 'precompressed', kind: 'precompressed', title: `Declare the ${unity.compression === 'brotli' ? 'Brotli' : 'gzip'}-compressed Unity build files`, reason: `${compressed.slice(0, 3).join(', ')} must be served with Content-Encoding: ${unity.compression === 'brotli' ? 'br' : 'gzip'} or the Unity loader stops; ${runtime ? `adds precompressed to ${RUNTIME_FILE}` : `writes ${RUNTIME_FILE}`} so Portal does`, recommended: true, required: true, paths: compressed, source: 'check' })
+  }
+  if (unity?.serviceWorker) {
+    const extra = [unity.serviceWorker.worker, unity.serviceWorker.manifest].filter((p): p is string => Boolean(p))
+    items.push({ id: 'unity-service-worker', kind: 'remove_service_worker', title: "Turn off the Unity PWA template's service worker", reason: `${unity.serviceWorker.file} registers ServiceWorker.js; offline caching belongs to OriginGame's Player, and a game-level worker can serve stale releases`, recommended: true, paths: extra, source: 'check' })
+  }
+  if (unity?.fixedCanvas) {
+    const paths = [present.has('index.html') ? 'index.html' : entry, ...(present.has('TemplateData/style.css') ? ['TemplateData/style.css'] : [])]
+    items.push({ id: 'unity-canvas', kind: 'code_edit', title: `Let the Unity canvas fill the Player frame (now a fixed ${unity.fixedCanvas.width}x${unity.fixedCanvas.height})`, reason: `the template draws a ${unity.fixedCanvas.width}x${unity.fixedCanvas.height}px canvas with a footer, so inside the Player's frame it is cropped or letterboxed; the canvas should fill the page and follow its size`, recommended: true, paths, source: 'check' })
   }
   if (godotSw) {
     items.push({ id: 'godot-service-worker', kind: 'remove_service_worker', title: 'Turn off the Godot export\'s service worker', reason: `the export registers ${godotSw}; offline caching and isolation headers belong to OriginGame's Player, and a game-level worker can serve stale releases`, recommended: true, paths: present.has(godotSw) ? [godotSw] : [], source: 'check' })

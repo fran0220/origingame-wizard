@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { UNITY_CACHE_DIRS } from './detect.js'
 import { WizardError } from './errors.js'
 import { isTextFile, readText } from './files.js'
 import { ensureHome, projectKey } from './home.js'
@@ -86,7 +87,11 @@ function carry(ws: Workspace, checkoutRoot: string, gameDir: string): void {
   ws.carried.clear()
   const changed = nul(tryGit(checkoutRoot, ['diff', '--name-only', '--no-renames', '-z', 'HEAD']))
   const untracked = nul(tryGit(checkoutRoot, ['ls-files', '--others', '--exclude-standard', '-z']))
+  const sub0 = path.relative(checkoutRoot, gameDir).split(path.sep).join('/')
+  const unity = fs.existsSync(path.join(gameDir, 'ProjectSettings', 'ProjectVersion.txt'))
+  const cache = (file: string) => unity && UNITY_CACHE_DIRS.includes((sub0 && file.startsWith(`${sub0}/`) ? file.slice(sub0.length + 1) : sub0 ? '' : file).split('/')[0]!)
   for (const file of [...new Set([...changed, ...untracked])]) {
+    if (cache(file)) continue
     const from = path.join(checkoutRoot, file)
     const to = path.join(ws.root, file)
     ws.carried.add(file)
@@ -114,8 +119,11 @@ function copyWorkspace(projectDir: string, stageDir: string): Workspace {
   const dir = path.join(stageDir, 'project')
   fs.rmSync(dir, { recursive: true, force: true })
   fs.mkdirSync(dir, { recursive: true })
+  // A Unity project's import cache and temporary folders stay behind (the Unity build seeds its own cache from them).
+  const unity = fs.existsSync(path.join(projectDir, 'ProjectSettings', 'ProjectVersion.txt'))
   for (const entry of fs.readdirSync(projectDir)) {
     if (entry === 'node_modules' || entry === '.git') continue
+    if (unity && UNITY_CACHE_DIRS.includes(entry)) continue
     fs.cpSync(path.join(projectDir, entry), path.join(dir, entry), { recursive: true, verbatimSymlinks: true, dereference: false })
   }
   const modules = path.join(projectDir, 'node_modules')

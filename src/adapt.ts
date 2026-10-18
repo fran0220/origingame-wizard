@@ -4,6 +4,7 @@ import { absoluteRefs, type PlanItem } from './findings.js'
 import { isTextFile, listFiles } from './files.js'
 import { isSecretFile } from './secrets.js'
 import type { Edit } from './tasks.js'
+import { disableUnityServiceWorker, mergeRuntime, RUNTIME_FILE, unityBuildIn } from './unity.js'
 
 export interface Applied { applied: string[]; skipped: string[] }
 
@@ -97,9 +98,12 @@ export function applyItems(site: string, items: PlanItem[], entry: string): Appl
         break
       }
       case 'cross_origin_isolation':
-        fs.writeFileSync(path.join(site, 'origingame.runtime.json'), `${JSON.stringify({ version: 1, crossOriginIsolated: true })}\n`)
-        result.applied.push('origingame.runtime.json declares crossOriginIsolated')
+      case 'precompressed': {
+        const field = item.kind === 'precompressed' ? 'precompressed' : 'crossOriginIsolated'
+        if (mergeRuntime(site, { [field]: true })) result.applied.push(`${RUNTIME_FILE} declares ${field}`)
+        else result.skipped.push(`${RUNTIME_FILE} is not a version-1 JSON object; ${field} was not declared`)
         break
+      }
       case 'remove_service_worker': {
         for (const file of listFiles(site).filter(f => /\.html?$/i.test(f))) {
           const absolute = path.join(site, file)
@@ -108,9 +112,11 @@ export function applyItems(site: string, items: PlanItem[], entry: string): Appl
             .replace(/("ensureCrossOriginIsolationHeaders"\s*:\s*)true/g, '$1false')
           if (next !== text) fs.writeFileSync(absolute, next)
         }
+        const unity = unityBuildIn(site, fs.existsSync(path.join(site, 'index.html')) ? 'index.html' : entry)?.serviceWorker
+        if (unity) disableUnityServiceWorker(site, unity)
         for (const worker of item.paths ?? []) {
           const absolute = inside(site, worker)
-          if (absolute) fs.rmSync(absolute, { force: true })
+          if (absolute && worker !== 'index.html') fs.rmSync(absolute, { force: true })
         }
         result.applied.push('service worker turned off')
         break

@@ -88,7 +88,7 @@ export async function analyze(client: ModelClient, rules: Rules, digest: Digest,
   return answer
 }
 
-const SINGULAR = new Set(['entry_index', 'strip_platform_config', 'relative_paths', 'cross_origin_isolation', 'remove_service_worker', 'orientation'])
+const SINGULAR = new Set(['entry_index', 'strip_platform_config', 'relative_paths', 'cross_origin_isolation', 'precompressed', 'remove_service_worker', 'orientation'])
 
 /**
  * The plan the person confirms: every deterministic finding (the model cannot
@@ -102,7 +102,7 @@ export function mergePlan(findings: Findings, analysis: Analysis, stageFiles: Se
   for (const raw of analysis.items) {
     const item: PlanItem = { ...raw, source: 'model', paths: (raw.paths ?? []).map(p => p.replace(/^\.?\//, '')) }
     if (SINGULAR.has(item.kind) && kinds.has(item.kind)) continue
-    if (['entry_index', 'strip_platform_config', 'relative_paths', 'remove_service_worker', 'orientation'].includes(item.kind)) {
+    if (['entry_index', 'strip_platform_config', 'relative_paths', 'precompressed', 'remove_service_worker', 'orientation'].includes(item.kind)) {
       dropped.push(`${item.title} (${item.kind} is decided by the Wizard's own checks)`)
       continue
     }

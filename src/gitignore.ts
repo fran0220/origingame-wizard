@@ -75,6 +75,17 @@ export function ignored(rules: readonly Rule[], relative: string, isDir: boolean
   return result
 }
 
+/**
+ * What Unity's own .gitignore template leaves out of a Unity project: its
+ * import cache, temporary and build folders. Applied to a Unity project
+ * before its own .gitignore files, so a folder without one is not uploaded
+ * with gigabytes of Library/.
+ */
+export const UNITY_IGNORE = parseGitignore([
+  '/[Ll]ibrary/', '/[Tt]emp/', '/[Oo]bj/', '/[Bb]uild/', '/[Bb]uilds/', '/[Ll]ogs/', '/[Uu]ser[Ss]ettings/',
+  '/[Mm]emoryCaptures/', '/[Rr]ecordings/', '*.pidb.meta', '*.pdb.meta', '*.mdb.meta', 'sysinfo.txt', '*.apk', '*.aab', '*.unitypackage', 'crashlytics-build.properties',
+].join('\n'), '')
+
 export interface WalkEntry { path: string; size: number }
 
 /**
@@ -82,7 +93,7 @@ export interface WalkEntry { path: string; size: number }
  * directories in `skip` are never entered, symbolic links are not followed
  * (they are reported in `links`).
  */
-export function walkTracked(root: string, skip: ReadonlySet<string>): { files: WalkEntry[]; links: string[] } {
+export function walkTracked(root: string, skip: ReadonlySet<string>, base: Rule[] = []): { files: WalkEntry[]; links: string[] } {
   const files: WalkEntry[] = []
   const links: string[] = []
   const visit = (dir: string, relative: string, inherited: Rule[]) => {
@@ -106,6 +117,6 @@ export function walkTracked(root: string, skip: ReadonlySet<string>): { files: W
       }
     }
   }
-  visit(root, '', [])
+  visit(root, '', base)
   return { files: files.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path))), links }
 }

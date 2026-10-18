@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Detection } from './detect.js'
-import { isTextFile, listFiles, readText } from './files.js'
+import { UNITY_CACHE_DIRS, type Detection } from './detect.js'
+import { isTextFile, listFiles, projectSkip, readText } from './files.js'
 import type { Findings } from './findings.js'
 import { findSecrets, isSecretFile } from './secrets.js'
 import { exclusionReason } from './stage.js'
@@ -19,7 +19,7 @@ export interface FileContent { scope: Scope; path: string; text: string; truncat
  * name only, never by content.
  */
 export interface Digest {
-  project: { kind: string; engine: string; reasons: string[] }
+  project: { kind: string; engine: string; family: string | null; reasons: string[]; unity?: Detection['unity'] }
   build_files: Array<{ path: string; bytes: number }>
   source_files: Array<{ path: string; bytes: number }>
   more_build_files: number
@@ -86,21 +86,23 @@ export function buildDigest(input: { projectDir: string; site: string; detection
   const sourceRoot = input.hasSource ? projectDir : null
   const reader = new ContextReader({ build: site, source: sourceRoot })
   const buildFiles = listFiles(site)
-  const sourceFiles = sourceRoot ? listFiles(sourceRoot, SOURCE_SKIP).filter(f => !exclusionReason(f) || exclusionReason(f) === 'source map') : []
+  const sourceSkip = sourceRoot ? projectSkip(sourceRoot, SOURCE_SKIP, UNITY_CACHE_DIRS) : () => false
+  // Unity's .meta files sit beside every asset and say nothing about the game.
+  const sourceFiles = sourceRoot ? listFiles(sourceRoot, sourceSkip).filter(f => (!exclusionReason(f) || exclusionReason(f) === 'source map') && !f.endsWith('.meta')) : []
   const contents: FileContent[] = []
   const push = (c: FileContent | null) => { if (c) contents.push(c) }
 
   push(reader.read('build', 'index.html', 24 * 1024) ?? reader.read('build', detection.entry, 24 * 1024))
   if (sourceRoot) {
-    for (const name of ['package.json', 'vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'project.godot', 'README.md']) {
+    for (const name of ['package.json', 'vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'project.godot', 'ProjectSettings/ProjectVersion.txt', 'Packages/manifest.json', 'README.md']) {
       if (sourceFiles.includes(name)) push(reader.read('source', name, name === 'README.md' ? 4 * 1024 : 8 * 1024))
     }
     if (sourceFiles.includes('export_presets.cfg')) {
       push(reader.read('source', 'export_presets.cfg', 6 * 1024, line => !/pass|keystore|key|secret|token|user/i.test(line)))
     }
-    const code = sourceFiles.filter(f => /\.(m?[jt]sx?|vue|svelte|gd)$/.test(f) && !/\.(test|spec|d)\.[jt]sx?$/.test(f) && !f.startsWith('public/'))
+    const code = sourceFiles.filter(f => /\.(m?[jt]sx?|vue|svelte|gd|cs)$/.test(f) && !/\.(test|spec|d)\.[jt]sx?$/.test(f) && !f.startsWith('public/') && !/^Packages\//.test(f) && !/(^|\/)Editor\//.test(f))
     const ranked = code.sort((a, b) => {
-      const main = (f: string) => /(^|\/)(main|index|game|app)\.[a-z]+$/i.test(f) ? 0 : 1
+      const main = (f: string) => /(^|\/)(main|index|game|app|gamemanager|player)\.[a-z]+$/i.test(f) ? 0 : 1
       return main(a) - main(b) || fs.statSync(path.join(sourceRoot, a)).size - fs.statSync(path.join(sourceRoot, b)).size
     })
     for (const file of ranked.slice(0, 24)) push(reader.read('source', file, 12 * 1024))
@@ -111,11 +113,11 @@ export function buildDigest(input: { projectDir: string; site: string; detection
       if (!isMinified(text)) push(reader.read('build', file, 10 * 1024))
     }
   }
-  if (sourceRoot) for (const file of listFiles(sourceRoot, SOURCE_SKIP).filter(f => isSecretFile(f))) reader.read('source', file, 0)
+  if (sourceRoot) for (const file of listFiles(sourceRoot, sourceSkip).filter(f => isSecretFile(f))) reader.read('source', file, 0)
 
   const { items, ...facts } = findings
   const digest: Digest = {
-    project: { kind: detection.kind, engine: detection.engine, reasons: detection.reasons },
+    project: { kind: detection.kind, engine: detection.engine, family: detection.family?.label ?? null, reasons: detection.reasons, ...(detection.unity ? { unity: detection.unity } : {}) },
     build_files: listing(site, buildFiles),
     source_files: sourceRoot ? listing(sourceRoot, sourceFiles) : [],
     more_build_files: Math.max(0, buildFiles.length - MAX_LIST),

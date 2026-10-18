@@ -21,7 +21,7 @@ export function cleanTemp() {
 
 /** A copy of a fixture project in a fresh directory (symbolic links kept as links). */
 export function copyFixture(name) {
-  const dir = path.join(tempDir(name), name)
+  const dir = path.join(tempDir(path.basename(name)), path.basename(name))
   fs.cpSync(path.join(FIXTURES, name), dir, { recursive: true, verbatimSymlinks: true })
   return dir
 }

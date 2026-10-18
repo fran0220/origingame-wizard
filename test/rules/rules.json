@@ -9,5 +9,24 @@
     { "id": "threejs", "markers": ["package.json:\"three\"", "three.module.js", "three.module.min.js", "three.min.js", "three.core.js", "*.html:three.module", "*.html:/three@", "*.html:\"three\":"] },
     { "id": "html", "markers": ["index.html", "*.html"] }
   ],
+  "families": [
+    {"id": "unity", "label": "Unity", "engine": "unity", "generated": true, "locate": true, "markers": ["Build/*.loader.js", "Build/UnityLoader.js", "*.html:createUnityInstance(", "*.html:UnityLoader.instantiate("]},
+    {"id": "construct3", "label": "Construct 3", "engine": "html", "generated": true, "locate": true, "markers": ["c3runtime.js", "c3main.js", "*.html:c3runtime"]},
+    {"id": "construct2", "label": "Construct 2", "engine": "html", "generated": true, "locate": true, "markers": ["c2runtime.js"]},
+    {"id": "gamemaker", "label": "GameMaker", "engine": "html", "generated": true, "locate": true, "markers": ["html5game/*.js", "*.html:GameMaker_Init"]},
+    {"id": "cocos", "label": "Cocos Creator", "engine": "html", "generated": true, "locate": true, "markers": ["cocos2d-js*.js", "cocos-js/cc*.js", "src/settings*.json+application*.js", "src/settings*.js+main*.js+*.html:cocos"]},
+    {"id": "defold", "label": "Defold", "engine": "html", "generated": true, "locate": true, "markers": ["dmloader.js", "*.html:EngineLoader.load("]},
+    {"id": "playcanvas", "label": "PlayCanvas", "engine": "html", "generated": true, "locate": true, "markers": ["__start__.js+config.json", "playcanvas-stable*.js", "playcanvas*.min.js+config.json"]},
+    {"id": "rpgmaker-mz", "label": "RPG Maker MZ", "engine": "html", "generated": true, "locate": true, "markers": ["js/rmmz_core.js"]},
+    {"id": "rpgmaker-mv", "label": "RPG Maker MV", "engine": "html", "generated": true, "locate": true, "markers": ["js/rpg_core.js"]},
+    {"id": "renpy", "label": "Ren'Py", "engine": "html", "generated": true, "locate": true, "markers": ["renpy.wasm", "renpy.js+game.zip", "renpy-pre.js"]},
+    {"id": "pico8", "label": "PICO-8", "engine": "html", "generated": true, "locate": true, "markers": ["*.js:_cartdat", "*.html:pico8_buttons"]},
+    {"id": "twine", "label": "Twine", "engine": "html", "generated": true, "locate": true, "markers": ["*.html:<tw-storydata", "*.html:<div id=\"storeArea\""]},
+    {"id": "wasm-bindgen", "label": "Rust/WebAssembly (wasm-bindgen, e.g. Bevy)", "engine": "html", "generated": true, "locate": true, "markers": ["*_bg.wasm", "*.js:__wbindgen"]},
+    {"id": "emscripten", "label": "Emscripten (C/C++ WebAssembly)", "engine": "html", "generated": true, "locate": true, "markers": ["*.wasm+*.js:ENVIRONMENT_IS_WEB", "*.wasm+*.html:emscripten"]},
+    {"id": "phaser", "label": "Phaser", "engine": "html", "markers": ["package.json:\"phaser\"", "phaser.min.js", "phaser.js", "phaser.esm.js", "*.html:phaser.min.js", "*.html:/phaser@", "*.html:phaser.js"]},
+    {"id": "pixi", "label": "PixiJS", "engine": "html", "markers": ["package.json:\"pixi.js\"", "pixi.min.js", "pixi.js", "pixi.mjs", "*.html:/pixi.js@", "*.html:pixi.min.js"]},
+    {"id": "babylon", "label": "Babylon.js", "engine": "html", "markers": ["package.json:\"@babylonjs/core\"", "package.json:\"babylonjs\"", "babylon.js", "babylon.max.js", "*.html:cdn.babylonjs.com", "*.html:babylon.js"]}
+  ],
   "genres": ["arcade", "action", "puzzle", "shooter", "platformer", "racing", "strategy", "casual", "education", "cards", "other"]
 }
