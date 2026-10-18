@@ -84,6 +84,8 @@ export async function startPlatform({ rulesDir }) {
     readiness422: false,
     readinessSequence: null,
     script: () => { throw new Error('no model script') },
+    // AIGCC finals (aigcc/server/src/finals.ts): null = the account's team is not in the finals.
+    aigcc: { team: null, open: true, refuseBind: false, submissions: [] },
     agent: { repos: new Map(), commits: new Map(), checkpoints: new Map(), lfs: new Map(), objects: new Map(), receipts: new Map(), bodies: [], raceNextCommit: false },
   }
   let imageSeq = 0
@@ -406,6 +408,30 @@ export async function startPlatform({ rulesDir }) {
       state.agent.objects.set(lfsPut[1], raw)
       res.writeHead(200).end()
       return
+    }
+
+    // AIGCC finals: the person's own sign-in only (a publish delegation is refused), Portal's receipt decides ownership.
+    if (url.pathname.startsWith('/api/aigcc/entry/finals')) {
+      const token = bearer(req)
+      if (!token || !state.deviceTokens.has(token) || state.revokedDevices.has(token)) return json(res, 401, { error: 'authentication required' })
+      const owner = `user:${ACCOUNT.id}`
+      const { team, open } = state.aigcc
+      const latest = state.aigcc.submissions.at(-1) ?? null
+      const game = latest && { submissionId: `sub-${latest.version}`, version: latest.version, gameId: latest.gameId, releaseId: latest.releaseId, releaseVersion: 1, playUrl: `${state.origin}/play/${latest.gameId}/`, boundBy: ACCOUNT.id, createdAt: Date.now() }
+      if (route === 'GET /api/aigcc/entry/finals') {
+        if (!team) return json(res, 200, { eligible: false, open: false, reason: 'finals material requires finalist status', registration: null, game: null })
+        return json(res, 200, { eligible: true, open, reason: open ? null : 'outside submission window', registration: team, game })
+      }
+      if (route === 'POST /api/aigcc/entry/finals/game') {
+        if (!team) return json(res, 403, { error: 'finals material requires finalist status' })
+        if (!open || state.aigcc.refuseBind) return json(res, 403, { error: 'outside submission window' })
+        const input = JSON.parse(raw.toString())
+        const target = state.games.get(input.gameId)
+        if (!target || target.owner !== owner) return json(res, 409, { error: 'published release unavailable' })
+        if (input.releaseId !== target.currentReleaseId) return json(res, 409, { error: 'published release unavailable' })
+        state.aigcc.submissions.push({ gameId: input.gameId, releaseId: input.releaseId, version: state.aigcc.submissions.length + 1 })
+        return json(res, 201, { ok: true, game: { ...game, version: state.aigcc.submissions.length, gameId: input.gameId, releaseId: input.releaseId, playUrl: `${state.origin}/play/${input.gameId}/` }, classification: 'classified' })
+      }
     }
 
     // Portal (contracts §5).

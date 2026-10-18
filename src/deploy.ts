@@ -17,7 +17,8 @@ import { integrate, type IntegrationResult } from './integrate.js'
 import { deviceLogin, logout, storedCredential } from './login.js'
 import { ModelClient, apiOrigin, newUsage } from './model.js'
 import { openInBrowser } from './open.js'
-import { Portal, publishError, type OwnGame } from './portal.js'
+import { describe } from './http.js'
+import { Portal, publishError, type AigccFinals, type OwnGame } from './portal.js'
 import { fetchRules, type Rules } from './rules.js'
 import { findSecrets } from './secrets.js'
 import { planSource, uploadSource, type SourcePlan, type SourceReport } from './source.js'
@@ -54,6 +55,8 @@ export interface DeployResult {
   workspace: { kind: 'worktree'; path: string; branch: string; base: string; commits: Commit[]; review: string; merge: string } | { kind: 'copy'; path: string }
   /** Score and save wiring: applied, or why not (declined, no web source, or dropped after a failed readiness check). */
   integration: { applied: boolean; files?: string[]; reason?: string }
+  /** The AIGCC finals submission of this release; null when it was not requested. */
+  aigcc: { submitted: true; team: string; version: number; playUrl: string } | { submitted: false; reason: string } | null
 }
 
 const SKIP_SCAN = new Set(['node_modules', '.git', '.godot', '.import', '.svn', '.hg', '.cache', '.vite', '.next'])
@@ -204,8 +207,8 @@ async function chooseProject(options: Options, ui: Ui, rules: Rules): Promise<{ 
  * folder published before, which an interactive run may swap for a new game or
  * one of the account's other games.
  */
-async function chooseTarget(options: Options, ui: Ui, portal: Portal, projectDir: string, host: string, sandbox: boolean): Promise<{ gameId: string | undefined; current: OwnGame | null }> {
-  let gameId = options.game ?? (sandbox ? undefined : rememberedGame(projectDir, host)?.gameId)
+async function chooseTarget(options: Options, ui: Ui, portal: Portal, projectDir: string, host: string, sandbox: boolean, preferred?: string): Promise<{ gameId: string | undefined; current: OwnGame | null }> {
+  let gameId = options.game ?? (sandbox ? undefined : rememberedGame(projectDir, host)?.gameId ?? preferred)
   if (gameId) {
     const existing = await portal.releases(gameId)
     if (existing.status === 404 && !options.game) {
@@ -252,6 +255,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     await revokeSession(host, current)
   }
   const removeHook = onCleanup(revoke)
+  // A person answering questions; Automatic keeps this while taking every default.
+  const guided = ui.interactive
   try {
     ui.intro('Origin Wizard')
     if (ui.interactive) {
@@ -321,7 +326,10 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
 
     // 4. The game this folder publishes to.
     const portal = new Portal(host, portalAuth)
-    const { gameId, current } = await chooseTarget(options, ui, portal, projectDir, host, Boolean(sandbox))
+    const finals = sandbox || options.aigcc === false ? null : await aigccFinals(options, ui, portal, guided)
+    let preferred: string | undefined
+    if (finals?.game && !options.game) preferred = (await portal.mine())?.some(g => g.id === finals.game!.gameId) ? finals.game.gameId : undefined
+    const { gameId, current } = await chooseTarget(options, ui, portal, projectDir, host, Boolean(sandbox), preferred)
     const action = gameId ? 'updated' : 'created'
 
     // 5. The source: saved by default, checked before any model spend.
@@ -616,6 +624,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       warnings.push({ code: 'readiness.failed', message: `the readiness check reports "${readiness.status}"; open the release in OriginGame to see why` })
     }
     if (!sandbox) rememberGame(projectDir, { gameId: published.gameId, slug: published.slug, host, ...(repositoryId ? { repositoryId } : {}) })
+    const aigcc = finals ? await submitFinals(portal, finals, published, ui, warnings) : null
 
     const workspace: DeployResult['workspace'] = ws.kind === 'worktree'
       ? { kind: 'worktree', path: ws.root, branch: ws.branch!, base: ws.base!, commits: ws.commits, review: `git diff HEAD...${PUBLISH_BRANCH}`, merge: `git merge ${PUBLISH_BRANCH}` }
@@ -626,7 +635,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       playUrl: String(body.playUrl ?? ''), portalUrl: String(body.portalUrl ?? ''),
       readiness, warnings, engine: detection.engine, stageSha256: manifest.hash, rulesVersion: rules.version, adaptations,
       usage: { sessionId: active.session_id, quota: active.budget_quota, ...usage },
-      source, workspace, integration,
+      source, workspace, integration, aigcc,
     }
     telemetry.track('published', { action, engine: detection.engine })
     ui.note(action === 'created' ? 'Published' : `Updated to version ${published.version}`, [
@@ -642,6 +651,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
           ]
         : [`The adapted copy is in ${workspace.path} (your folder was not changed).`]),
       ...(integration.applied ? [] : [`Scores and saves: not wired (${integration.reason})`]),
+      ...(aigcc?.submitted ? [`AIGCC finals: submitted for ${aigcc.team} (version ${aigcc.version}); it is in the AIGCC games channel`] : []),
+      ...(aigcc && !aigcc.submitted ? [`AIGCC finals: NOT submitted (${aigcc.reason}); run npx origingame --aigcc again`] : []),
     ].join('\n'))
     if (ui.interactive && result.playUrl && (await ui.confirm('Open the game in your browser?', true))) openInBrowser(result.playUrl)
     return result
@@ -649,4 +660,44 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     removeHook()
     await revoke()
   }
+}
+
+/**
+ * Step 4a: whether this release becomes the team's AIGCC finals game. Checked
+ * before any model spend. `--aigcc` requires it; a guided run asks when the
+ * team is in the finals; a script without `--aigcc` only learns that it could.
+ */
+async function aigccFinals(options: Options, ui: Ui, portal: Portal, guided: boolean): Promise<AigccFinals | null> {
+  const state = await portal.aigccFinals()
+  if (options.aigcc) {
+    if (!state?.eligible || !state.open || !state.registration) {
+      throw new WizardError('aigcc_refused', `cannot submit to AIGCC: ${state?.reason ?? 'the AIGCC service did not answer'}`)
+    }
+    ui.step(`AIGCC finals: this release will be submitted for ${state.registration.teamName}`)
+    return state
+  }
+  if (!state?.eligible || !state.open || !state.registration) return null
+  const team = state.registration
+  if (!guided) {
+    ui.info(`${team.teamName} is in the AIGCC finals; pass --aigcc to submit this release as its finals game`)
+    return null
+  }
+  const yes = await ui.confirm(`Submit this as ${team.teamName}'s AIGCC finals game ("${team.projectTitle}")? (Recommended)`, true)
+  if (yes) ui.step(`AIGCC finals: this release will be submitted for ${team.teamName}`)
+  return yes ? state : null
+}
+
+/** Step 9: the published release becomes the finals game; the publication stands even if this is refused. */
+async function submitFinals(portal: Portal, finals: AigccFinals, published: { gameId: string; releaseId: string }, ui: Ui, warnings: Warning[]): Promise<DeployResult['aigcc']> {
+  const s = ui.spinner('Submitting to AIGCC')
+  const response = await portal.aigccSubmit(published.gameId, published.releaseId).catch((error: Error) => error)
+  if (!(response instanceof Error) && response.ok && response.json?.game) {
+    const game = response.json.game
+    s.stop(`Submitted as ${finals.registration!.teamName}'s AIGCC finals game (version ${game.version})`)
+    return { submitted: true, team: finals.registration!.teamName, version: Number(game.version), playUrl: String(game.playUrl ?? '') }
+  }
+  const reason = response instanceof Error ? response.message : describe(response)
+  s.fail('AIGCC did not accept the submission')
+  warnings.push({ code: 'aigcc.failed', message: `the game is published but not submitted to AIGCC (${reason}); run npx origingame --aigcc again` })
+  return { submitted: false, reason }
 }

@@ -20,6 +20,8 @@ export interface Options {
   prebuilt: string | undefined
   credentialsFile: string | undefined
   sourceCheckpoint: string | undefined
+  /** Submit the published release as the team's AIGCC finals game: true `--aigcc`, false `--no-aigcc`, undefined asks when the team is in the finals. */
+  aigcc: boolean | undefined
 }
 
 const COMMANDS = new Set<Command>(['deploy', 'login', 'logout', 'whoami', 'help', 'version'])
@@ -46,6 +48,8 @@ Options for scripts and agents (they take the Automatic choices without asking):
   --no-source                do not save the source to your private repository
   --no-integrate             do not wire leaderboards and cloud saves into the code
   --game <id>                update this game instead of the one remembered for the folder
+  --aigcc                    submit the release as your team's AIGCC finals game (fails early if the team is not in the finals)
+  --no-aigcc                 do not submit to AIGCC (a guided run asks when your team is in the finals)
   --title <title>            game title
   --unlisted                 keep the game out of the public catalog (anyone with the link can play)
   --prebuilt <dir>           skip the build and publish this folder
@@ -61,9 +65,12 @@ export function parseOptions(argv: string[]): Options {
   let telemetry = true
   let source = true
   let integrate = true
+  let aigcc: boolean | undefined
   const rest: string[] = []
   for (const arg of argv) {
     if (arg === '--no-telemetry') telemetry = false
+    else if (arg === '--aigcc') aigcc = true
+    else if (arg === '--no-aigcc') aigcc = false
     else if (arg === '--no-source') source = false
     else if (arg === '--no-integrate') integrate = false
     else rest.push(arg)
@@ -120,6 +127,7 @@ export function parseOptions(argv: string[]): Options {
     prebuilt: values.prebuilt,
     credentialsFile: values['credentials-file'],
     sourceCheckpoint: values['source-checkpoint'],
+    aigcc,
   }
   if (options.game !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(options.game)) {
     throw new WizardError('invalid_arguments', '--game must be a game id')
@@ -128,6 +136,9 @@ export function parseOptions(argv: string[]): Options {
     throw new WizardError('invalid_arguments', '--source-checkpoint must match [a-zA-Z0-9_-]{1,200}')
   }
   if (options.title !== undefined && !options.title.trim()) throw new WizardError('invalid_arguments', '--title must not be empty')
+  if (options.aigcc && options.credentialsFile) {
+    throw new WizardError('invalid_arguments', '--aigcc needs your own sign-in; a sandbox run cannot submit to AIGCC')
+  }
   if (options.credentialsFile && !options.sourceCheckpoint) {
     throw new WizardError('invalid_arguments', '--credentials-file (sandbox mode) requires --source-checkpoint')
   }

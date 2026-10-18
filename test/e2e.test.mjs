@@ -739,3 +739,88 @@ describe('--with-source', () => {
     assert.ok(agentRequests(run) > 0)
   })
 })
+
+describe('AIGCC finals (--aigcc)', () => {
+  const TEAM = { id: 'aigcc-fixture', teamName: 'Flower Team', projectTitle: 'Playable Garden', track: 'culture', stage: 'finalist', captain: false }
+  const aigccRequests = run => run.requests.filter(q => q.path.startsWith('/api/aigcc/')).map(q => `${q.method} ${q.path}`)
+  const reset = (team = null) => Object.assign(platform.state.aigcc, { team, open: true, refuseBind: false, submissions: [] })
+
+  test('a team outside the finals is refused before any model call or publication; the session is revoked', async () => {
+    reset()
+    platform.state.script = scriptFor('plain-html')
+    const m = mark()
+    const cli = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--no-source', '--aigcc', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const run = since(m)
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.ok, false)
+    assert.equal(cli.result.error.code, 'aigcc_refused')
+    assert.match(cli.result.error.message, /finalist status/)
+    assert.equal(run.chat.length + run.images.length + run.deploys.length, 0)
+    assert.equal(run.sessions[0].revoked, true)
+  })
+
+  test('a finalist publishes, then the exact release is submitted with the person\'s own sign-in; scripts never submit without --aigcc', async () => {
+    reset(TEAM)
+    platform.state.script = scriptFor('plain-html')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const project = copyFixture('plain-html')
+    let m = mark()
+    const quiet = await runCli(['deploy', '--dir', project, '--json', '--no-source', '--host', platform.origin], { home })
+    let run = since(m)
+    assert.equal(quiet.code, 0, quiet.stderr)
+    assert.equal(quiet.result.aigcc, null)
+    assert.deepEqual(aigccRequests(run), ['GET /api/aigcc/entry/finals'], 'a script only learns that it could submit')
+    assert.match(quiet.stderr, /pass --aigcc/)
+    assert.equal(platform.state.aigcc.submissions.length, 0)
+
+    platform.state.script = scriptFor('plain-html')
+    m = mark()
+    const cli = await runCli(['deploy', '--dir', project, '--json', '--no-source', '--aigcc', '--host', platform.origin], { home })
+    run = since(m)
+    report.scenarios.aigccFinals = { exitCode: cli.code, result: cli.result, aigccRequests: aigccRequests(run) }
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.deepEqual(cli.result.aigcc, { submitted: true, team: 'Flower Team', version: 1, playUrl: `${platform.origin}/play/${cli.result.gameId}/` })
+    assert.deepEqual(platform.state.aigcc.submissions, [{ gameId: cli.result.gameId, releaseId: cli.result.releaseId, version: 1 }])
+    const order = run.requests.map(q => `${q.method} ${q.path}`)
+    assert.ok(order.indexOf(`PUT /api/deploy/${cli.result.gameId}`) < order.indexOf('POST /api/aigcc/entry/finals/game'), 'submitted after publication')
+    for (const q of run.requests.filter(q => q.path.startsWith('/api/aigcc/'))) assert.equal(q.authorization, `Bearer ${DEVICE_TOKEN}`)
+  })
+
+  test('without a remembered game, --aigcc updates the team\'s bound finals game instead of creating another', async () => {
+    reset(TEAM)
+    platform.state.script = scriptFor('plain-html')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const first = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--no-source', '--aigcc', '--host', platform.origin], { home })
+    assert.equal(first.code, 0, first.stderr)
+    fs.rmSync(path.join(home, '.origingame', 'projects.json'))
+    platform.state.script = scriptFor('plain-html')
+    const m = mark()
+    const again = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--no-source', '--aigcc', '--host', platform.origin], { home })
+    const run = since(m)
+    assert.equal(again.code, 0, again.stderr)
+    assert.equal(again.result.action, 'updated')
+    assert.equal(again.result.gameId, first.result.gameId)
+    assert.equal(run.deploys.at(-1).method, 'PUT')
+    assert.deepEqual(platform.state.aigcc.submissions.map(s => s.version), [1, 2])
+  })
+
+  test('a refused submission keeps the publication and reports how to retry', async () => {
+    reset(TEAM)
+    platform.state.aigcc.refuseBind = true
+    platform.state.script = scriptFor('plain-html')
+    const cli = await runCli(['deploy', '--dir', copyFixture('plain-html'), '--json', '--no-source', '--aigcc', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    assert.equal(cli.code, 0, cli.stderr)
+    assert.equal(cli.result.ok, true)
+    assert.equal(cli.result.aigcc.submitted, false)
+    assert.match(cli.result.aigcc.reason, /outside submission window/)
+    assert.ok(cli.result.warnings.some(w => w.code === 'aigcc.failed' && /--aigcc again/.test(w.message)))
+    assert.equal(platform.state.aigcc.submissions.length, 0)
+    reset()
+  })
+
+  test('--aigcc is refused in sandbox mode', async () => {
+    const cli = await runCli(['deploy', '--json', '--aigcc', '--credentials-file', '/nonexistent', '--source-checkpoint', 'ckpt_x'], { home: tempDir('home') })
+    assert.equal(cli.code, 1)
+    assert.equal(cli.result.error.code, 'invalid_arguments')
+  })
+})

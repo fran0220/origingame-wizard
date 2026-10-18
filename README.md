@@ -136,6 +136,8 @@ Automatic choices without asking.
 | `--no-source` | do not save the source to your private repository |
 | `--no-integrate` | do not wire leaderboards and cloud saves |
 | `--game <id>` | update this game instead of the one remembered for the folder |
+| `--aigcc` | submit the release as your team's AIGCC finals game; fails before any model call if the team is not in the finals |
+| `--no-aigcc` | do not submit to AIGCC (a guided run asks when your team is in the finals) |
 | `--title <title>` | the game's title |
 | `--unlisted` | keep the game out of the public catalog (anyone with the link can play) |
 | `--prebuilt <dir>` | skip the build and publish this folder |
@@ -177,7 +179,7 @@ stdout is a single JSON line:
 
 Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`,
 `adapt_failed`, `artwork_failed`, `upload_failed`, `source_failed`, `publish_failed`,
-`readiness_failed` (with `error.readiness`), `rules_unavailable`, `aborted`,
+`readiness_failed` (with `error.readiness`), `rules_unavailable`, `aigcc_refused`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
 `source` is `{repositoryId, checkpointId, commit, createdRepository, files, bytes,
@@ -189,6 +191,27 @@ committed, deleted, lfsObjects, withheld}`, or `null` with `--no-source`.
 If the agent's machine is not signed in, the command prints a sign-in link and
 code on stderr and waits for you to approve it in the browser. In CI, sign in
 beforehand or set `OG_API_KEY`.
+
+### AIGCC finals
+
+Teams the organizer advanced to the AIGCC finals (八强, 决赛 or an award) publish
+their finals game with the Wizard. Any confirmed team member signs in with their
+own account and runs, in the game's folder:
+
+```sh
+npx origingame --aigcc
+```
+
+The Wizard checks that the team is in the finals and the window is open before
+any model spend, publishes as usual (updating the team's finals game when it is
+yours and the folder has no other game), then submits the exact release to AIGCC.
+AIGCC verifies the team and Portal's ownership receipt and adds the game to the
+AIGCC games channel. Run it again for each new version. A guided run without the
+flag asks when the team is in the finals; a script never submits without
+`--aigcc`. The JSON result has `aigcc`: `{submitted:true,team,version,playUrl}`,
+`{submitted:false,reason}` (the game is published; the warning `aigcc.failed`
+says to run again) or `null`. Error code `aigcc_refused`: not in the finals or
+the window is closed. Sandbox mode cannot submit.
 
 ### Sandbox mode
 

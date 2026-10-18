@@ -13,6 +13,7 @@ export type ErrorCode =
   | 'publish_failed'
   | 'readiness_failed'
   | 'rules_unavailable'
+  | 'aigcc_refused'
   | 'aborted'
   | 'invalid_arguments'
 

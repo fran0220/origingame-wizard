@@ -1,6 +1,6 @@
 {
   "name": "origingame",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Origin Wizard: analyze a web game, adapt it to OriginGame and publish it in one command. Model and cover-art costs are paid by the platform.",
   "license": "MIT",
   "type": "module",

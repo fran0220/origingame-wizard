@@ -146,6 +146,18 @@ export class Portal {
       await sleep(3000)
     }
   }
+
+  /** The team's AIGCC finals state (`GET /api/aigcc/entry/finals`), or null when AIGCC does not answer. */
+  async aigccFinals(): Promise<AigccFinals | null> {
+    const response = await this.call('/api/aigcc/entry/finals', {}, 'publish_failed').catch(() => null)
+    const body = response?.ok ? response.json : null
+    return body && typeof body.eligible === 'boolean' ? body as AigccFinals : null
+  }
+
+  /** Binds a live release as the team's finals game; AIGCC verifies the team, the window and ownership. */
+  async aigccSubmit(gameId: string, releaseId: string): Promise<HttpResponse> {
+    return this.call('/api/aigcc/entry/finals/game', { method: 'POST', json: { gameId, releaseId } }, 'publish_failed')
+  }
 }
 
 export function publishError(response: HttpResponse): WizardError {
@@ -157,4 +169,12 @@ export function publishError(response: HttpResponse): WizardError {
   }
   if (response.status === 401) return new WizardError('not_logged_in', `Portal refused the credential (${describe(response)})`)
   return new WizardError('publish_failed', `Portal refused the publication: ${describe(response)}`)
+}
+
+export interface AigccFinals {
+  eligible: boolean
+  open: boolean
+  reason: string | null
+  registration: { id: string; teamName: string; projectTitle: string; stage: string; captain: boolean } | null
+  game: { gameId: string; releaseId: string; version: number; playUrl: string } | null
 }
