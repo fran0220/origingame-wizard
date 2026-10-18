@@ -36,7 +36,33 @@ It works with:
 | Vite, three.js and other npm builds | `package.json` with a `build` script | built in a scratch copy (`--base ./` for Vite), then published |
 | Godot Web exports | an `.html` beside a `.pck` and a `.wasm` | published, with thread builds declared cross-origin isolated |
 | Godot projects | `project.godot` | exported with your local Godot editor (`GODOT=/path/to/godot`), or the existing Web export is used |
+| Unity WebGL builds | `index.html` with `Build/*.loader.js` (or a legacy `UnityLoader.js`), at the root, in a subfolder or as `--prebuilt` | published as is; a compressed build is declared precompressed, a threaded one cross-origin isolated (see [Unity](#unity)) |
+| Unity projects | `Assets/` and `ProjectSettings/ProjectVersion.txt` | built for WebGL in batch mode with your local Unity Editor, or the existing WebGL build is used |
+| Other engines' Web exports | the engine's own files (below) | published as is, with the engine named in the plan |
 | Prebuilt output | `dist/`, `build/`, `out/` … with an `index.html`, or `--prebuilt <dir>` | published as is |
+| Native builds (Windows `.exe`, macOS `.app`, Linux, Android `.apk`/`.aab`, iOS Xcode) | the executable and its data folder | never uploaded: the Wizard switches to the Unity or Godot project beside it, or says how to export for the Web |
+
+Web exports of other engines are recognized by their files, and the catalog
+engine Portal receives stays one of `html`, `threejs`, `godot`, `unity` (the
+engine's name is shown in the plan and returned as `family`):
+
+| Engine or framework | Recognized by | Catalog engine |
+|---|---|---|
+| Construct 3 / Construct 2 | `c3runtime.js` or `c3main.js` / `c2runtime.js` | html |
+| GameMaker (HTML5) | `html5game/*.js`, or `GameMaker_Init` in the page | html |
+| Cocos Creator (web-mobile, web-desktop) | `cocos2d-js*.js`, `cocos-js/cc*.js`, or `src/settings*` with the application script | html |
+| Defold (HTML5 bundle) | `dmloader.js`, or `EngineLoader.load(` in the page | html |
+| PlayCanvas | `__start__.js` with `config.json`, or `playcanvas*.js` | html |
+| RPG Maker MZ / MV | `js/rmmz_core.js` / `js/rpg_core.js` | html |
+| Ren'Py (Web) | `renpy.wasm`, `renpy.js` with `game.zip`, or `renpy-pre.js` | html |
+| PICO-8 (HTML export) | `_cartdat` in the script, or the page's `pico8_buttons` | html |
+| Twine | a story page with `<tw-storydata` (or TiddlyWiki's `storeArea`) | html |
+| Rust + wasm-bindgen (Bevy, Leptos …) | `*_bg.wasm`, or `__wbindgen` in the JS glue | html |
+| Emscripten (C/C++, raylib, SDL) | a `.wasm` with Emscripten's JS glue or page | html |
+| Phaser, PixiJS, Babylon.js | the library file, or the dependency in `package.json` | html |
+
+The markers and labels in this table are part of the platform's
+Wizard rules, so new engines are added there without a new Wizard release.
 
 ## How it works
 
@@ -56,6 +82,66 @@ The next run in the same directory updates the same game: its id is remembered i
 `~/.origingame/projects.json`, the current release revision is read, and the
 update is sent with `expected_revision`, so a change made elsewhere in the
 meantime is never overwritten. An update keeps the listing and artwork you have.
+
+## Unity
+
+**A WebGL build** (the folder Unity writes: `index.html`, `Build/`,
+`TemplateData/`, maybe `StreamingAssets/`) is published as Unity wrote it.
+Run `npx origingame` in that folder, in a folder above it, or pass
+`--prebuilt <dir>`.
+
+- Any **Compression Format** works. A Brotli (`.br`) or gzip (`.gz`) build is
+  declared `"precompressed": true` in `origingame.runtime.json`, and the Player
+  serves those files with their `Content-Encoding`. Turn **Decompression
+  Fallback** off: the Wizard warns when a build uses it (`.unityweb`), because
+  the browser then decompresses in JavaScript, which is slower.
+- A build with **WebGL threads** (shared memory, found by reading the
+  `.wasm` itself, compressed or not) is also declared cross-origin isolated.
+  An existing `origingame.runtime.json` is merged, never replaced.
+- OriginGame accepts **50 MiB per file and 200 MiB in total**. An
+  uncompressed build over those limits is Brotli-compressed by the Wizard for
+  that release (the loader references in `index.html` are updated and the
+  build is declared precompressed; your folder is not changed). If it does not
+  fit even compressed, the Wizard says which files are too large and what to
+  change in Unity (Brotli, code stripping, texture compression, moving content
+  to Addressables).
+- The page template may get small edits so the canvas fills the Player's
+  frame; the Unity PWA template's service worker is turned off, because the
+  Player owns caching. `Build/` files are never edited.
+- Leaderboards and cloud saves are not wired into Unity games (the Wizard
+  cannot edit and rebuild C#); the game is published without them.
+
+**A Unity project** (`Assets/`, `ProjectSettings/ProjectVersion.txt`) is
+built for WebGL in batch mode with your own Unity Editor:
+
+- The editor is the one set in `UNITY` (path to the Unity executable or its
+  install folder), else the Unity Hub install of exactly the version in
+  `ProjectVersion.txt` (default Hub locations and a custom Hub install path),
+  else `Unity` on `PATH`. The **WebGL Build Support** module must be
+  installed. When something is missing the Wizard prints the Unity Hub steps
+  (including a `unityhub://` link for the exact version) and, if the project
+  already has a WebGL build, publishes that one instead.
+- The build runs in a scratch copy of the project, with a small build script
+  (`Assets/OriginGameWizard/Editor/`) added only to that copy. It builds the
+  scenes enabled in Build Settings. Your project is never changed.
+- The first build of a project imports every asset and can take a long time.
+  The time limit is 180 minutes (`ORIGINGAME_UNITY_TIMEOUT_MINUTES`). To make
+  later builds fast, the Wizard keeps the copy's `Library/` import cache in
+  `~/.origingame/unity/<project>/Library` (seeded from your project's own
+  `Library/` on the first run). It can be large; delete
+  `~/.origingame/unity/` at any time to reclaim the space.
+- Unity needs an activated license in batch mode; an unlicensed editor, a
+  compile error or a failed build is reported with the lines from the Unity
+  log that explain it.
+- Your source is saved without `Library/`, `Temp/`, `Logs/`, `obj/`, builds
+  or `UserSettings/`, even when the project has no `.gitignore`.
+
+**A native build** (for example `My Game.exe` with `My Game_Data/` and
+`UnityPlayer.dll`) cannot be published, since OriginGame publishes Web builds
+only. The Wizard looks for the project it came from: the folder itself, its
+parents (up to four levels) and their subfolders. It builds that project
+instead. When there is none, it says what it found and how to export for the
+Web in that engine.
 
 ## What is sent to the model, and what is not
 
@@ -149,7 +235,8 @@ Automatic choices without asking.
 
 Environment: `OG_HOST` (platform origin), `OG_API_KEY` (an `og-` account key used
 instead of the stored sign-in, never written to disk), `GODOT` (path to the
-Godot editor), `CI` (fail instead of starting a browser sign-in),
+Godot editor), `UNITY` (path to the Unity Editor), `ORIGINGAME_UNITY_TIMEOUT_MINUTES`
+(time limit of a Unity build, default 180), `CI` (fail instead of starting a browser sign-in),
 `ORIGINGAME_NO_BROWSER=1` (print the sign-in link without opening a browser),
 `ORIGINGAME_READINESS_WAIT_SECONDS` (how long to wait for the readiness check,
 default 60), `ORIGINGAME_API_ORIGIN` (the AI Gateway relay for model calls, default
@@ -168,7 +255,7 @@ stdout is a single JSON line:
 
 ```json
 {"ok":true,"action":"created","gameId":"…","slug":"…","version":1,"releaseId":"…","playUrl":"…","portalUrl":"…",
- "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","stageSha256":"…","rulesVersion":"…","adaptations":["…"],
+ "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","family":null,"stageSha256":"…","rulesVersion":"…","adaptations":["…"],
  "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":3,"imageCalls":5,"models":["…"]},
  "source":{"repositoryId":"…","checkpointId":"…"},
  "workspace":{"kind":"worktree","path":"…/.origingame/worktrees/…","branch":"origingame/publish","base":"…",
@@ -182,6 +269,9 @@ Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`
 `readiness_failed` (with `error.readiness`), `rules_unavailable`, `aigcc_refused`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
+`engine` is the catalog engine Portal received (`html`, `threejs`, `godot`, `unity`);
+`family` is `{id, label}` for the engine or framework the files showed
+(`{"id":"construct3","label":"Construct 3"}`), or `null`.
 `source` is `{repositoryId, checkpointId, commit, createdRepository, files, bytes,
 committed, deleted, lfsObjects, withheld}`, or `null` with `--no-source`.
 `workspace` is the worktree (as above) or `{"kind":"copy","path":"…"}` outside Git.
@@ -248,7 +338,9 @@ node dist/cli.js deploy --dir fixtures/plain-html --host http://localhost:8080
 
 The end-to-end tests run the built CLI as a subprocess against a fake platform
 (`test/fake-platform.mjs`) that implements the Identity, AI Gateway and Portal
-contracts, on the three fixture projects in `fixtures/`, and write
+contracts, on the fixture projects in `fixtures/` (plain pages, npm builds,
+Godot, Unity and other engines' exports, native builds), with a stand-in Unity
+Editor (`test/fake-unity.mjs`), and write
 `test-artifacts/e2e-report.json` plus the chosen artwork. Set
 `WIZARD_RULES_DIR=<platform>/packages/game-knowledge/production/wizard` to run
 them against the real rules and prompts.

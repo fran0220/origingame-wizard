@@ -19,7 +19,14 @@ SDKs.
 
 ## Where things live
 
-- `src/detect.ts`: deterministic project detection (pure function).
+- `src/detect.ts`: deterministic project detection (pure function), including
+  the engine families named by the platform rules (`families`, matched by
+  their markers) and native builds.
+- `src/unity.ts`: Unity Editor discovery, the batch-mode build script, the
+  `Library/` cache, Unity build facts, `origingame.runtime.json` merging and
+  Brotli packing of builds over the size limits.
+- `src/native.ts`: native builds (messages, and the search for the project
+  they came from).
 - `src/build.ts`, `src/stage.ts`: scratch-copy builds and the staged copy.
 - `src/findings.ts`, `src/adapt.ts`: deterministic checks and adaptations.
 - `src/digest.ts`, `src/secrets.ts`: what the model may see.
@@ -40,7 +47,11 @@ fake platform in `test/fake-platform.mjs` and asserts what the CLI actually
 did (its JSON result, the files and fields the platform received, the project
 tree before and after). Add a unit test only for a behavior those cannot
 reach (tricky detector trees, the secret scanner), and write down the ways the
-unit can fail before writing it. Before trusting a new test, break the code it
+unit can fail before writing it. Unity is exercised with `test/fake-unity.mjs`,
+a stand-in editor that records how it was run and writes a fixture build; the
+fixtures under `fixtures/` (and `fixtures/engines/`) are small but structurally
+real exports. No test needs a real Unity Editor, so check a change to the build
+script against one by hand. Before trusting a new test, break the code it
 covers and confirm it fails. Never read source text in a test.
 
 ## Pull requests
