@@ -102,7 +102,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
       candidates = [...covers, ...posters]
       g.stop(`Drew ${covers.length} cover${covers.length === 1 ? '' : 's'} and ${posters.length} poster${posters.length === 1 ? '' : 's'}`)
     } catch (error) {
-      g.fail('Artwork generation failed')
+      g.fail(`Artwork generation failed: ${(error as Error).message}`)
       throw error
     }
     const preview = previewPage(dir, input.metadata.title, candidates)
