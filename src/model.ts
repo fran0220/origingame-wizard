@@ -66,9 +66,9 @@ export class ModelClient {
     if (!this.usage.models.includes(model)) this.usage.models.push(model)
   }
 
-  private async post(path: string, body: unknown, timeoutMs: number) {
+  private async post(path: string, body: unknown, timeoutMs: number, attempts = 3) {
     let last: Error | null = null
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const response = await request(`${this.host}${path}`, {
           headers: { authorization: `Bearer ${this.session.credential}` }, json: body, timeoutMs,
@@ -185,7 +185,7 @@ export class ModelClient {
       this.record(model)
       let response
       try {
-        response = await this.post('/v1/images/generations', { model, prompt, size: candidate, n: 1 }, 240_000)
+        response = await this.post('/v1/images/generations', { model, prompt, size: candidate, n: 1 }, 540_000, 1)
       } catch (error) {
         throw new WizardError('artwork_failed', `image generation could not reach the model: ${(error as Error).message}`)
       }
