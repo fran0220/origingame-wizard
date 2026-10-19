@@ -274,9 +274,14 @@ export async function preview(dir: string, options: { waitMs: number; screenshot
     report.note = `the browser preview failed: ${(error as Error).message}`
   } finally {
     cdp?.close()
-    child?.kill('SIGKILL')
+    if (child && child.exitCode === null) {
+      const exited = new Promise(resolve => child!.once('exit', resolve))
+      child.kill('SIGKILL')
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))])
+    }
     await server.close()
-    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 })
+    // The browser may still be flushing its profile; what is left behind is a temporary folder.
+    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch { /* best effort */ }
   }
   const noise = (line: string) => line.includes('/favicon.ico')
   report.consoleErrors = [...new Set(report.consoleErrors.filter(l => !noise(l)))].slice(0, 30)

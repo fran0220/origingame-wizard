@@ -108,6 +108,7 @@ function carry(ws: Workspace, checkoutRoot: string, gameDir: string): void {
     if (!/^\.env(\..+)?$/.test(name)) continue
     const file = path.join(sub, name).split(path.sep).join('/')
     if (ws.carried.has(file) || fs.existsSync(path.join(ws.dir, name))) continue
+    fs.mkdirSync(ws.dir, { recursive: true })
     fs.copyFileSync(path.join(gameDir, name), path.join(ws.dir, name))
     ws.carried.add(file)
   }
@@ -139,6 +140,8 @@ export function prepareWorkspace(projectDir: string, stageDir: string, options: 
   const top = tryGit(projectDir, ['rev-parse', '--show-toplevel'])?.trim()
   const head = top ? tryGit(projectDir, ['rev-parse', '--verify', '-q', 'HEAD'])?.trim() : null
   if (!top || !head) return copyWorkspace(projectDir, stageDir)
+  // A folder the repository ignores is not in its worktrees: it is worked on as a copy.
+  if (tryGit(projectDir, ['check-ignore', '-q', '.']) !== null) return copyWorkspace(projectDir, stageDir)
   const checkoutRoot = fs.realpathSync(top)
   const gameDir = fs.realpathSync(projectDir)
   tryGit(checkoutRoot, ['worktree', 'prune'])

@@ -9,12 +9,13 @@ import type { Ui } from './ui.js'
 export interface AccountCredential { token: string; account: Account | null; source: 'stored' | 'env' }
 
 /**
- * The `og-` account credential for this host: `OG_API_KEY` (never written to
- * disk) or the device credential in ~/.origingame/credentials.json.
+ * The account credential for this host: `OG_API_KEY` (an `og-` account key, or
+ * a legacy `sk-` creator key Identity still accepts; never written to disk) or
+ * the device credential in ~/.origingame/credentials.json.
  */
 export function storedCredential(host: string): AccountCredential | null {
   const env = process.env.OG_API_KEY
-  if (env && env.startsWith('og-')) return { token: env, account: null, source: 'env' }
+  if (env && /^(og|sk)-/.test(env)) return { token: env, account: null, source: 'env' }
   const stored = readCredentials()
   if (stored && stored.host === host && stored.access_token.startsWith('og-')) return { token: stored.access_token, account: stored.account, source: 'stored' }
   return null

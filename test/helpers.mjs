@@ -63,7 +63,7 @@ export const sha256 = data => createHash('sha256').update(data).digest('hex')
 /** Runs the built CLI as a subprocess; resolves with its exit code, stdout, stderr and the parsed JSON line. */
 export function runCli(args, { home, env = {}, cwd = ROOT, timeoutMs = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const childEnv = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, ORIGINGAME_NO_BROWSER: '1', ORIGINGAME_READINESS_WAIT_SECONDS: '20', npm_config_update_notifier: 'false', ...env }
+    const childEnv = { PATH: process.env.PATH, HOME: home, ...(process.env.CHROME_PATH ? { CHROME_PATH: process.env.CHROME_PATH } : {}), USERPROFILE: home, ORIGINGAME_NO_BROWSER: '1', ORIGINGAME_READINESS_WAIT_SECONDS: '20', npm_config_update_notifier: 'false', ...env }
     const child = spawn(process.execPath, [CLI, ...args], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
@@ -99,7 +99,7 @@ export const KEY = { enter: '\r', down: '\x1b[B', up: '\x1b[A', right: '\x1b[C',
  */
 export function runPty(args, steps, { home, env = {}, cwd = ROOT, timeoutSeconds = 90 } = {}) {
   const spec = path.join(tempDir('pty'), 'spec.json')
-  const childEnv = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, TERM: 'xterm-256color', ORIGINGAME_NO_BROWSER: '1', ORIGINGAME_READINESS_WAIT_SECONDS: '20', npm_config_update_notifier: 'false', ...env }
+  const childEnv = { PATH: process.env.PATH, HOME: home, ...(process.env.CHROME_PATH ? { CHROME_PATH: process.env.CHROME_PATH } : {}), USERPROFILE: home, TERM: 'xterm-256color', ORIGINGAME_NO_BROWSER: '1', ORIGINGAME_READINESS_WAIT_SECONDS: '20', npm_config_update_notifier: 'false', ...env }
   fs.writeFileSync(spec, JSON.stringify({ argv: [process.execPath, CLI, ...args], env: childEnv, cwd, steps, timeoutSeconds }))
   return new Promise((resolve, reject) => {
     const child = spawn('python3', ['-I', path.join(ROOT, 'test', 'pty-driver.py'), spec], { stdio: ['ignore', 'pipe', 'pipe'] })
