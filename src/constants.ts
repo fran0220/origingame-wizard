@@ -14,12 +14,16 @@ export const RULES_PATH = '/wizard/v1/rules.json'
 export const DEVICE_CLIENT = 'wizard'
 
 /**
- * Engines Portal accepts for `engine` (its catalog ids). Portal stores any
- * other value as `html`, so an older Portal treats `unity` as `html`. Engines
- * Portal does not list (Construct, GameMaker, Phaser …) are a *family* of the
- * detection, shown to the person, and publish as `html`.
+ * Engines Portal accepts for a new deploy's `engine` (its catalog ids,
+ * server/src/lib/catalog.ts DEPLOY_ENGINE_SET). `origin-engine` is an
+ * `og build --publish` output: Portal keeps its `sw.js` and
+ * `manifest.webmanifest` only for that engine, so it must never be sent as
+ * `html`. Portal refuses `godot` for new deploys (a Godot Web export is a
+ * static build and publishes as `html`); an older Portal stores an unknown
+ * value as `html`. Engines Portal does not list (Construct, GameMaker, Phaser …)
+ * are a *family* of the detection, shown to the person, and publish as `html`.
  */
-export const PORTAL_ENGINES = ['html', 'threejs', 'godot', 'unity'] as const
+export const PORTAL_ENGINES = ['html', 'origin-engine', 'threejs', 'unity'] as const
 export type Engine = (typeof PORTAL_ENGINES)[number]
 
 /**

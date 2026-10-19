@@ -5,6 +5,7 @@ import { UNITY_CACHE_DIRS, type Detection } from './detect.js'
 import { WizardError } from './errors.js'
 import { readText } from './files.js'
 import { ensureHome, projectKey } from './home.js'
+import { findOg, readOgBuild } from './og.js'
 import { batchArgs, explainUnityLog, findUnityEditor, injectBuildScript, installEditorSteps, libraryCache, webglModuleSteps } from './unity.js'
 import { redact } from './redact.js'
 import type { Ui } from './ui.js'
@@ -56,28 +57,6 @@ function workspaceCopy(projectDir: string, workspace: string, exclude: string[])
   if (fs.existsSync(modules)) fs.symlinkSync(modules, path.join(workspace, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
 }
 
-function findGodot(): string | null {
-  const candidates = [process.env.GODOT, 'godot', 'godot4', '/Applications/Godot.app/Contents/MacOS/Godot']
-  for (const candidate of candidates) {
-    if (!candidate) continue
-    if (candidate.includes('/')) { if (fs.existsSync(candidate)) return candidate; continue }
-    for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
-      const full = path.join(dir, candidate)
-      if (fs.existsSync(full)) return full
-    }
-  }
-  return null
-}
-
-export function webPreset(cfg: string): string | null {
-  const blocks = cfg.split(/^\[preset\.\d+\]\s*$/m).slice(1)
-  for (const block of blocks) {
-    const name = /^name="([^"]+)"/m.exec(block)?.[1]
-    if (name && /^platform="Web"/m.test(block)) return name
-  }
-  return null
-}
-
 async function nodeBuild(projectDir: string, detection: Detection, stageDir: string, ui: Ui): Promise<BuildResult> {
   const plan = detection.build!
   const workspace = path.join(stageDir, 'work')
@@ -112,31 +91,37 @@ async function nodeBuild(projectDir: string, detection: Detection, stageDir: str
   return { outputDir, entry: 'index.html', built: true, warnings: [] }
 }
 
-async function godotBuild(projectDir: string, detection: Detection, stageDir: string, ui: Ui): Promise<BuildResult> {
-  const godot = findGodot()
-  const preset = webPreset(readText(path.join(projectDir, 'export_presets.cfg')) ?? '')
+/**
+ * An Origin Engine project, built with `og build <copy> --publish --out <dir>`
+ * in a scratch copy (og cooks into the project's `cooked/`, so never in the
+ * project itself). Without `og` an existing `og build --publish` output in the
+ * tree is published instead, with a warning that it may be older.
+ */
+async function originEngineBuild(projectDir: string, detection: Detection, stageDir: string, ui: Ui, originalDir: string): Promise<BuildResult> {
+  const og = findOg(projectDir) ?? (originalDir !== projectDir ? findOg(originalDir) : null)
   const existing = detection.existingExport
-  if (!godot || !preset) {
-    const missing = !godot ? 'no Godot editor was found (set GODOT=/path/to/godot)' : 'export_presets.cfg has no Web preset'
+  if (!og) {
     if (existing) {
-      return { outputDir: path.join(projectDir, existing.root), entry: existing.entry, built: false,
-        warnings: [`${missing}; publishing the existing export in ${existing.root}/, which may be older than the project`] }
+      // A build directory is usually ignored by Git, so it may exist only in the person's folder, not the worktree.
+      const inWork = path.join(projectDir, existing.root, 'og-build.json')
+      const outputDir = fs.existsSync(inWork) ? path.join(projectDir, existing.root) : path.join(originalDir, existing.root)
+      return { outputDir, entry: existing.entry, built: false,
+        warnings: [`og was not found (install the project's dependencies, which bring @origingame/engine's og, or set OG=/path/to/og); publishing the existing og build in ${existing.root}/, which may be older than the project`] }
     }
-    throw new WizardError('build_failed', `cannot export this Godot project: ${missing}. Export it for Web in the editor, then run again (or pass --prebuilt <dir>).`)
+    throw new WizardError('build_failed', 'cannot build this Origin Engine project: og was not found. Install the project\'s dependencies (npm install brings @origingame/engine and its og) or set OG=/path/to/og, then run again; or run og build . --publish yourself and run npx origingame again (or pass --prebuilt <dir>).')
   }
   const workspace = path.join(stageDir, 'work')
   const out = path.join(stageDir, 'build-output')
   const log = path.join(stageDir, 'build.log')
-  workspaceCopy(projectDir, workspace, existing?.root ? [existing.root.split('/')[0]!] : [])
-  fs.mkdirSync(out, { recursive: true })
-  const s = ui.spinner(`Exporting with Godot preset "${preset}" (in a scratch copy)`)
-  await run(godot, ['--headless', '--path', workspace, '--import'], workspace, log)
-  const code = await run(godot, ['--headless', '--path', workspace, '--export-release', preset, path.join(out, 'index.html')], workspace, log)
-  if (code !== 0 || !fs.existsSync(path.join(out, 'index.html'))) {
-    s.fail('Godot export failed')
-    throw new WizardError('build_failed', `Godot export failed (exit ${code}):\n${tail(log)}`)
+  workspaceCopy(projectDir, workspace, [...new Set([...detection.outputs, 'og-out', '.og'].map(o => o.split('/')[0]!))])
+  const s = ui.spinner('Building with `og build --publish` (in a scratch copy; your project is not touched)')
+  const code = await run(og, ['build', workspace, '--publish', '--out', out], workspace, log)
+  const manifest = readOgBuild(out)
+  if (code !== 0 || !fs.existsSync(path.join(out, 'index.html')) || !manifest) {
+    s.fail('og build failed')
+    throw new WizardError('build_failed', `\`og build --publish\` failed (exit ${code}${code === 0 ? ', but it wrote no index.html and og-build.json' : ''}):\n${tail(log)}`)
   }
-  s.stop('Exported')
+  s.stop(`Built with og build --publish (${manifest.files.size - 1} files)`)
   return { outputDir: out, entry: 'index.html', built: true, warnings: [] }
 }
 
@@ -223,7 +208,7 @@ export async function buildProject(projectDir: string, detection: Detection, sta
   }
   switch (detection.kind) {
     case 'node-build': return nodeBuild(projectDir, detection, stageDir, ui)
-    case 'godot-project': return godotBuild(projectDir, detection, stageDir, ui)
+    case 'origin-engine': return originEngineBuild(projectDir, detection, stageDir, ui, originalDir)
     case 'unity-project': return unityBuild(projectDir, detection, stageDir, ui, originalDir)
     default: return { outputDir: path.join(projectDir, detection.root), entry: detection.entry, built: false, warnings: [] }
   }

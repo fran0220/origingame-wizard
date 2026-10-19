@@ -1,0 +1,8 @@
+# og cook output: rebuilt from assets/, never committed.
+cooked/
+# og build output.
+dist/
+# og run and og test output, and og's bundled entry.
+og-out/
+.og/
+node_modules/

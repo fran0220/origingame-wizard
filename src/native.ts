@@ -22,7 +22,7 @@ const ENGINE: Record<NonNullable<NativeBuild['engine']>, string> = {
 /** How to get a Web build out of each engine, in its own menu names. */
 const EXPORT: Record<NonNullable<NativeBuild['engine']> | 'unknown', string> = {
   unity: 'In Unity, export WebGL (File > Build Settings > WebGL > Switch Platform > Build; in Unity 6 File > Build Profiles > Web) and run npx origingame in the folder it writes, or run npx origingame in the Unity project folder (the one with Assets/ and ProjectSettings/) and the Wizard builds WebGL with your Unity Editor.',
-  godot: 'In Godot, add a Web export (Project > Export > Add… > Web, then Export Project) and run npx origingame in that folder, or run npx origingame in the Godot project folder (the one with project.godot) and the Wizard exports it with your Godot editor.',
+  godot: 'In Godot, add a Web export (Project > Export > Add… > Web, then Export Project) and run npx origingame in that folder, or export it into a folder of the Godot project (the one with project.godot) and run npx origingame there. It is published as the static Web build it is.',
   unreal: 'Unreal Engine 5 has no Web export (HTML5 was removed in 4.24), so an Unreal game cannot be published on OriginGame as it is.',
   gamemaker: 'In GameMaker, choose the HTML5 target (Target Manager > HTML5) and Build > Create Executable, then run npx origingame in the folder with its index.html.',
   renpy: "In the Ren'Py launcher, choose Web (Beta) > Build Web Application, then run npx origingame in the folder it writes (it holds index.html and game.zip).",

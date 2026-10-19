@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="og-engine" content="0.0.1">
+<meta name="og-build" content="publish">
+<meta name="og-profile" content="2d">
+<meta name="theme-color" content="#14161b">
+<meta name="color-scheme" content="dark">
+<title>Tile Swap</title>
+<link rel="icon" href="./icons/icon-512.png">
+<link rel="apple-touch-icon" href="./icons/icon-512.png">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="modulepreload" href="./play.js">
+<style>
+html,body{margin:0;height:100%;background:#14161b;overflow:hidden}
+#og-stage,#og-canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+</style>
+</head>
+<body>
+<div id="og-stage"><canvas id="og-canvas" tabindex="0" aria-label="Tile Swap"></canvas></div>
+<script type="application/json" id="og-config">{"engine":"0.0.1","build":"publish","name":"Tile Swap","profile":"2d","isolation":"preferred","fit":"fill","aspect":null,"orientation":"portrait","dprCap":2,"fullscreen":"off","gate":"tap","madeWith":true,"serviceWorker":true,"expect":{"wasm":8,"cooked":96}}</script>
+<script type="module" src="./play.js"></script>
+</body>
+</html>

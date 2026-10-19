@@ -26,15 +26,18 @@ export function exclusionReason(file: string): string | null {
 /**
  * Copies the build output into `site` (the staged copy). Only this copy is
  * adapted and uploaded; the project and its build output are never changed.
+ * `keep` names files an engine wrote and its runtime fetches, which are staged
+ * even when hidden (an og build's `cooked/.cook.ogt`, the cook manifest the
+ * engine loads first).
  */
-export function stageCopy(outputDir: string, site: string): { files: string[]; excluded: Excluded[] } {
+export function stageCopy(outputDir: string, site: string, keep?: ReadonlySet<string>): { files: string[]; excluded: Excluded[] } {
   fs.rmSync(site, { recursive: true, force: true })
   fs.mkdirSync(site, { recursive: true })
   const excluded: Excluded[] = []
   const files: string[] = []
   for (const file of listFiles(outputDir, new Set(['.git', 'node_modules']))) {
     const reason = exclusionReason(file)
-    if (reason) { excluded.push({ path: file, reason }); continue }
+    if (reason && !(reason === 'hidden file' && keep?.has(file))) { excluded.push({ path: file, reason }); continue }
     const target = path.join(site, file)
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(outputDir, file), target)

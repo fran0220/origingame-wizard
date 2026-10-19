@@ -19,7 +19,7 @@ export interface IntegrationResult { applied: string[]; skipped: string[]; summa
 
 export async function integrate(client: ModelClient, rules: Rules, ui: Ui, input: { projectDir: string; stageDir: string; detection: Detection; digest: Digest; reader: ContextReader; where: string }): Promise<IntegrationResult | { refused: string }> {
   const { projectDir, detection } = input
-  if (detection.engine === 'godot' || detection.kind === 'godot-export' || detection.kind === 'prebuilt') {
+  if (detection.family?.id === 'godot' || detection.kind === 'godot-export' || detection.kind === 'prebuilt' || detection.kind === 'origin-engine-build') {
     return { refused: 'the project has no web source code (HTML or JavaScript/TypeScript) to wire' }
   }
   const s = ui.spinner('Planning the score and save integration')

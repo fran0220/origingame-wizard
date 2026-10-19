@@ -1,0 +1,12 @@
+type cook
+version 1
+---
+bundle "cooked"
+object "scenes/main.ogt" {
+  file "scenes/main.ogt.ogb"
+  type scene
+}
+object "sprites/tiles.png" {
+  file "sprites/tiles.png.ogb"
+  type texture
+}

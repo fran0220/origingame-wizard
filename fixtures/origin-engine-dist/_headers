@@ -1,0 +1,17 @@
+/*
+  Cross-Origin-Resource-Policy: cross-origin
+  X-Content-Type-Options: nosniff
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/sw.js
+  Cache-Control: no-cache
+/og-build.json
+  Cache-Control: no-cache
+/*.wasm
+  Content-Type: application/wasm
+/manifest.webmanifest
+  Content-Type: application/manifest+json

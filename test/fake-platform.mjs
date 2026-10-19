@@ -551,6 +551,13 @@ export async function startPlatform({ rulesDir }) {
         if (!upload || upload.state !== 'finalized' || upload.owner !== owner) return json(res, 400, { error: 'source upload not found' })
         if (!/^release_[0-9a-f]{32,64}$/.test(fields.operation_id ?? '')) return json(res, 400, { error: 'invalid operation_id' })
         if (record.authorization?.startsWith('Bearer ogd-') && !fields.source_checkpoint) return json(res, 400, { error: 'source_checkpoint required' })
+        // Portal's engine rule (server/src/lib/catalog.ts): a deploy declares html, origin-engine, threejs or unity;
+        // godot is refused for new deploys, except from the released Wizards 0.1–0.4 (stored as html).
+        let provenance = {}
+        try { provenance = JSON.parse(fields.provenance ?? '{}') } catch { provenance = {} }
+        if (fields.engine === 'godot' && !/^origingame-wizard\/0\.[0-4]\.\d+/.test(String(provenance.agent_client ?? ''))) {
+          return json(res, 400, { error: 'engine godot is retired for new deploys; declare origin-engine (an og build --publish output), unity (a Unity WebGL build) or html' })
+        }
         deploy.files = Object.fromEntries(upload.entries.map(e => [e.path, state.blobs.get(`${owner}:${e.sha256}`)]))
         if (req.method === 'POST') {
           if (!fields.title) return json(res, 400, { error: 'missing title' })

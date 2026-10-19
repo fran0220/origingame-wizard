@@ -1,0 +1,17 @@
+{
+  "name": "tile-swap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "og dev .",
+    "start": "og run .",
+    "build": "og build .",
+    "publish-build": "og build . --publish",
+    "cook": "og cook .",
+    "test": "og test ."
+  },
+  "dependencies": {
+    "@origingame/engine": "0.0.1"
+  }
+}

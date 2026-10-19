@@ -34,16 +34,18 @@ It works with:
 |---|---|---|
 | Plain HTML / canvas games | `index.html` (or a single page) at the root | published as is, after adaptation |
 | Vite, three.js and other npm builds | `package.json` with a `build` script | built in a scratch copy (`--base ./` for Vite), then published |
-| Godot Web exports | an `.html` beside a `.pck` and a `.wasm` | published, with thread builds declared cross-origin isolated |
-| Godot projects | `project.godot` | exported with your local Godot editor (`GODOT=/path/to/godot`), or the existing Web export is used |
+| Origin Engine projects | `project.ogt` | built with `og build --publish` in a scratch copy (the project's `node_modules/.bin/og` from `@origingame/engine`, `OG=/path/to/og`, or `og` on `PATH`), or the existing `og build --publish` output is used; published as engine `origin-engine` exactly as og wrote it (see [Origin Engine](#origin-engine)) |
+| Origin Engine builds | `og-build.json` (or `origin-engine.js` with `origin-engine_bg.wasm`) beside `index.html`, at the root, in a subfolder or as `--prebuilt` | published as engine `origin-engine`, as og wrote it |
+| Godot Web exports | an `.html` beside a `.pck` and a `.wasm` | published as engine `html` (Portal no longer takes new Godot releases), with thread builds declared cross-origin isolated |
+| Godot projects | `project.godot` | the Web export in the project is published; without one the run stops: export for the Web in the Godot editor first |
 | Unity WebGL builds | `index.html` with `Build/*.loader.js` (or a legacy `UnityLoader.js`), at the root, in a subfolder or as `--prebuilt` | published as is; a compressed build is declared precompressed, a threaded one cross-origin isolated (see [Unity](#unity)) |
 | Unity projects | `Assets/` and `ProjectSettings/ProjectVersion.txt` | built for WebGL in batch mode with your local Unity Editor, or the existing WebGL build is used |
 | Other engines' Web exports | the engine's own files (below) | published as is, with the engine named in the plan |
 | Prebuilt output | `dist/`, `build/`, `out/` … with an `index.html`, or `--prebuilt <dir>` | published as is |
-| Native builds (Windows `.exe`, macOS `.app`, Linux, Android `.apk`/`.aab`, iOS Xcode) | the executable and its data folder | never uploaded: the Wizard switches to the Unity or Godot project beside it, or says how to export for the Web |
+| Native builds (Windows `.exe`, macOS `.app`, Linux, Android `.apk`/`.aab`, iOS Xcode) | the executable and its data folder | never uploaded: the Wizard switches to the Unity project beside it (or a Godot project's Web export), or says how to export for the Web |
 
 Web exports of other engines are recognized by their files, and the catalog
-engine Portal receives stays one of `html`, `threejs`, `godot`, `unity` (the
+engine Portal receives stays one of `html`, `origin-engine`, `threejs`, `unity` (the
 engine's name is shown in the plan and returned as `family`):
 
 | Engine or framework | Recognized by | Catalog engine |
@@ -144,12 +146,32 @@ parents (up to four levels) and their subfolders. It builds that project
 instead. When there is none, it says what it found and how to export for the
 Web in that engine.
 
+## Origin Engine
+
+An Origin Engine game is published as `og build --publish` wrote it, with
+engine `origin-engine`, so Portal keeps what only that engine gets: the
+service worker (`sw.js`) and web manifest that make it installable. The
+Wizard publishes every file og listed in `og-build.json`, including the
+hidden `cooked/.cook.ogt` the engine loads first, and edits none of them:
+
+- A **project** (`project.ogt`) is built in a scratch copy with
+  `og build <copy> --publish --out <dir>` (never the template's `npm run
+  build`, which is a dev build), so og's `cooked/` never lands in your
+  folder. Without `og` the existing build in `publish.out` (default `dist/`)
+  is published with a warning, or the run stops before any model call with
+  how to install it.
+- Cross-origin isolation is `og-build.json`'s `crossOriginIsolation`; an older
+  build without `origingame.runtime.json` gets the declaration og would write.
+- A dev build (`og build` without `--publish`) is published with a warning.
+- Scores and saves are not wired into the build output; wire them in the
+  project's `src/` through `og.platform`, then publish the project.
+
 ## What is sent to the model, and what is not
 
 Sent, through the OriginGame AI Gateway, to DeepSeek:
 
 - the list of file names and sizes in your build (and in your source, for projects that are built);
-- your entry HTML and up to about 120 KB of source text: `package.json`, the Vite config, `project.godot`, the Web preset of `export_presets.cfg` (lines mentioning passwords, keys or keystores removed), and your main scripts;
+- your entry HTML and up to about 120 KB of source text: `package.json`, the Vite config, `project.ogt`, `project.godot`, the Web preset of `export_presets.cfg` (lines mentioning passwords, keys or keystores removed), and your main scripts;
 - the deterministic findings (for example "`style.css` references `/assets/bg.png`").
 
 For the artwork, the image model receives only the text prompts DeepSeek wrote
@@ -240,8 +262,8 @@ Automatic choices without asking.
 | `--with-source`, `--integrate` | accepted for 0.1 callers; both are the default now |
 
 Environment: `OG_HOST` (platform origin), `OG_API_KEY` (an `og-` account key used
-instead of the stored sign-in, never written to disk), `GODOT` (path to the
-Godot editor), `UNITY` (path to the Unity Editor), `ORIGINGAME_UNITY_TIMEOUT_MINUTES`
+instead of the stored sign-in, never written to disk), `OG` (path to Origin
+Engine's `og`), `UNITY` (path to the Unity Editor), `ORIGINGAME_UNITY_TIMEOUT_MINUTES`
 (time limit of a Unity build, default 180), `CI` (fail instead of starting a browser sign-in),
 `ORIGINGAME_NO_BROWSER=1` (print the sign-in link without opening a browser),
 `ORIGINGAME_READINESS_WAIT_SECONDS` (how long to wait for the readiness check,
@@ -275,7 +297,7 @@ Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`
 `readiness_failed` (with `error.readiness`), `rules_unavailable`, `aigcc_refused`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
-`engine` is the catalog engine Portal received (`html`, `threejs`, `godot`, `unity`);
+`engine` is the catalog engine Portal received (`html`, `origin-engine`, `threejs`, `unity`);
 `family` is `{id, label}` for the engine or framework the files showed
 (`{"id":"construct3","label":"Construct 3"}`), or `null`.
 `source` is `{repositoryId, checkpointId, commit, createdRepository, files, bytes,
@@ -345,8 +367,9 @@ node dist/cli.js deploy --dir fixtures/plain-html --host http://localhost:8080
 The end-to-end tests run the built CLI as a subprocess against a fake platform
 (`test/fake-platform.mjs`) that implements the Identity, AI Gateway and Portal
 contracts, on the fixture projects in `fixtures/` (plain pages, npm builds,
-Godot, Unity and other engines' exports, native builds), with a stand-in Unity
-Editor (`test/fake-unity.mjs`), and write
+Origin Engine projects and builds, Godot, Unity and other engines' exports,
+native builds), with a stand-in Unity Editor (`test/fake-unity.mjs`) and `og`
+(`test/fake-og.mjs`), and write
 `test-artifacts/e2e-report.json` plus the chosen artwork. Set
 `WIZARD_RULES_DIR=<platform>/packages/game-knowledge/production/wizard` to run
 them against the real rules and prompts.

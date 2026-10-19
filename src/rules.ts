@@ -17,7 +17,8 @@ export interface ImageRule {
  * ("Construct 3", "Unity", "Phaser") while Portal receives `engine`, one of
  * its catalog ids. Served under `families`, a key Wizard 0.1–0.3 ignore: those
  * versions refuse the whole document when `engines` names an id they do not
- * know, so `engines` keeps only `html`, `threejs` and `godot`.
+ * know, so `engines` keeps only `html`, `threejs` and `godot`, and Origin
+ * Engine is the family `origin-engine` (engine `origin-engine`).
  */
 export interface Family {
   id: string
@@ -119,7 +120,8 @@ export function validateRules(value: any): Rules {
   if (!value || typeof value !== 'object') fail('not an object')
   const prompts = value.prompts ?? {}
   const engines = Array.isArray(value.engines) ? value.engines : fail('engines missing')
-  const parsedEngines = engines.map((engine: any) => {
+  // `godot` may still be served to older Wizards; it is never declared (Portal refuses it), so its markers are not used.
+  const parsedEngines = engines.filter((engine: any) => engine?.id !== 'godot').map((engine: any) => {
     if (!PORTAL_ENGINES.includes(engine?.id)) fail(`unknown engine ${engine?.id}`)
     if (!Array.isArray(engine.markers) || engine.markers.some((m: unknown) => typeof m !== 'string')) fail(`engine ${engine.id} markers`)
     return { id: engine.id as Engine, markers: engine.markers as string[] }

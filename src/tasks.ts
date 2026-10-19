@@ -93,8 +93,11 @@ const SINGULAR = new Set(['entry_index', 'strip_platform_config', 'relative_path
 /**
  * The plan the person confirms: every deterministic finding (the model cannot
  * remove a fact), then the model's own items that the Wizard can apply.
+ * `generated` names files an engine wrote that are published as they are
+ * (an og build's files): no item may edit or leave them out, and isolation is
+ * the engine's decision.
  */
-export function mergePlan(findings: Findings, analysis: Analysis, stageFiles: Set<string>): { items: PlanItem[]; dropped: string[] } {
+export function mergePlan(findings: Findings, analysis: Analysis, stageFiles: Set<string>, generated?: ReadonlySet<string> | null): { items: PlanItem[]; dropped: string[] } {
   const items: PlanItem[] = [...findings.items]
   const dropped: string[] = []
   const kinds = new Set(items.map(i => i.kind))
@@ -106,9 +109,14 @@ export function mergePlan(findings: Findings, analysis: Analysis, stageFiles: Se
       dropped.push(`${item.title} (${item.kind} is decided by the Wizard's own checks)`)
       continue
     }
+    if (generated && item.kind === 'cross_origin_isolation') {
+      dropped.push(`${item.title} (an og build's isolation is og-build.json's crossOriginIsolation)`)
+      continue
+    }
     if (item.kind === 'exclude_files' || item.kind === 'code_edit') {
-      const paths = item.paths!.filter(p => stageFiles.has(p) && !(item.kind === 'exclude_files' && p === 'index.html'))
-      if (!paths.length) { dropped.push(`${item.title} (names no file in the build)`); continue }
+      const named = item.paths!.filter(p => stageFiles.has(p) && !(item.kind === 'exclude_files' && p === 'index.html'))
+      const paths = generated ? named.filter(p => !generated.has(p)) : named
+      if (!paths.length) { dropped.push(`${item.title} (${named.length ? 'og build files are published as og wrote them; change the project and build again' : 'names no file in the build'})`); continue }
       item.paths = paths
     }
     if (item.kind === 'cross_origin_isolation' && stageFiles.has('origingame.runtime.json')) continue

@@ -28,6 +28,7 @@ import { ADAPT_SCHEMA, analyze, mergePlan, metadataSchema, type Edit, type Metad
 import type { Telemetry } from './telemetry.js'
 import { automatic, type Ui } from './ui.js'
 import { apkEngine, findSourceProject, nativeMessage } from './native.js'
+import { readOgBuild } from './og.js'
 import { applyPack, compressPlanned, packedFits, planPack, unityBuildIn, unitySizeAdvice } from './unity.js'
 import { commitWorkspace, headOf, prepareWorkspace, PUBLISH_BRANCH, resetWorkspace, type Commit } from './workspace.js'
 
@@ -84,30 +85,36 @@ function fromNative(dir: string, native: Detection, rules: Rules, via: string | 
   const traced = engine === 'unity' || engine === 'godot' ? findSourceProject(buildDir, engine) : { dir: null, looked: [] }
   if (traced.dir) {
     const project = scan(traced.dir, rules)
-    if (project && (project.kind === 'unity-project' || project.kind === 'godot-project')) {
-      const label = engine === 'unity' ? 'Unity' : 'Godot'
-      project.reasons.unshift(`${via ? `${via}: ` : ''}${native.reasons.at(-1)}; OriginGame publishes Web builds, so the ${label} project it came from (${traced.dir}) is built for the Web instead`)
+    if (project && (project.kind === 'unity-project' || (engine === 'godot' && project.kind === 'godot-export'))) {
+      const instead = engine === 'unity' ? `the Unity project it came from (${traced.dir}) is built for the Web instead` : `the Web export of the Godot project it came from (${traced.dir}) is published instead`
+      project.reasons.unshift(`${via ? `${via}: ` : ''}${native.reasons.at(-1)}; OriginGame publishes Web builds, so ${instead}`)
       return { projectDir: traced.dir, detection: project, prebuilt: undefined }
     }
   }
   throw new WizardError('detect_failed', nativeMessage(via ? `${via} (${buildDir})` : buildDir, { ...info, engine: engine ?? info.engine }, traced.looked))
 }
 
+/** A Godot project with no Web export: the Wizard never runs the Godot editor (the Godot substrate is retired). */
+function godotWithoutExport(projectDir: string): WizardError {
+  return new WizardError('detect_failed', `${projectDir} is a Godot project with no Web export in it. OriginGame publishes a Godot game as the static Web build it exports: in Godot, add a Web export (Project > Export > Add… > Web), export it into a folder of this project (for example build/web/), then run npx origingame again here or in that folder.`)
+}
+
 function detect(projectDir: string, rules: Rules, prebuilt: string | undefined): Chosen {
   const project = scan(projectDir, rules)
   if (!prebuilt) {
     if (!project) {
-      throw new WizardError('detect_failed', `no game found in ${projectDir}: expected a Web build (an index.html, a Unity WebGL or Godot Web export, an engine's HTML5 export), a package.json with a build script, a Unity project or a Godot project (or pass --prebuilt <dir>)`)
+      throw new WizardError('detect_failed', `no game found in ${projectDir}: expected an Origin Engine project (project.ogt) or its og build, a Web build (an index.html, a Unity WebGL or Godot Web export, an engine's HTML5 export), a package.json with a build script or a Unity project (or pass --prebuilt <dir>)`)
     }
     if (project.kind === 'native') return fromNative(projectDir, project, rules, null)
+    if (project.kind === 'godot-project') throw godotWithoutExport(projectDir)
     return { projectDir, detection: project, prebuilt }
   }
   const dir = path.resolve(prebuilt)
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new WizardError('detect_failed', `--prebuilt ${prebuilt} is not a directory`)
   const inside = scan(dir, rules)
   if (inside?.kind === 'native') return fromNative(dir, inside, rules, `--prebuilt ${prebuilt}`)
-  if (inside?.kind === 'unity-webgl') {
-    // A Unity WebGL build, possibly one level down (`--prebuilt Builds` holding `WebGL/`): publish that folder.
+  if (inside?.kind === 'unity-webgl' || inside?.kind === 'origin-engine-build') {
+    // A Unity WebGL build or an og build, possibly one level down (`--prebuilt Builds` holding `WebGL/`): publish that folder.
     return { projectDir, detection: { ...inside, root: '', reasons: [`--prebuilt ${prebuilt}`, ...inside.reasons] }, prebuilt: path.join(dir, inside.root) }
   }
   const files = listFiles(dir, SKIP_SCAN)
@@ -175,7 +182,7 @@ const INTRO = [
   'to your private repository, writes the listing, draws a cover and a poster, and publishes it. The platform pays for the models.',
 ].join('\n')
 
-const ENGINE_NAMES: Record<Engine, string> = { html: 'HTML', threejs: 'three.js', godot: 'Godot', unity: 'Unity' }
+const ENGINE_NAMES: Record<Engine, string> = { html: 'HTML', 'origin-engine': 'Origin Engine', threejs: 'three.js', unity: 'Unity' }
 
 /** What was found, in words: "Vite + three.js project", "HTML game", "Godot Web export", "Construct 3 Web export". */
 function kindLabel(d: Detection): string {
@@ -186,6 +193,8 @@ function kindLabel(d: Detection): string {
       const bundler = /\bvite\b/.test(script) ? 'Vite' : /\bwebpack\b/.test(script) ? 'webpack' : /\bparcel\b/.test(script) ? 'Parcel' : 'Node'
       return `${bundler}${d.engine === 'html' && !d.family ? '' : ` + ${engine}`} project`
     }
+    case 'origin-engine': return 'Origin Engine project'
+    case 'origin-engine-build': return `Origin Engine build (og build${d.ogBuild === 'dev' ? '' : ' --publish'} output)`
     case 'godot-project': return 'Godot project'
     case 'godot-export': return 'Godot Web export'
     case 'unity-project': return `Unity project${d.unity?.version ? ` (Unity ${d.unity.version})` : ''}`
@@ -198,7 +207,8 @@ function kindLabel(d: Detection): string {
 /** Why the score and save wiring cannot apply, or null when it can. */
 function noIntegration(d: Detection): string | null {
   if (d.kind === 'unity-project' || d.kind === 'unity-webgl' || d.engine === 'unity') return 'a Unity build is generated by the engine: its JavaScript cannot be edited meaningfully, so scores and saves are not wired'
-  if (d.engine === 'godot' || d.kind === 'godot-export') return 'the project has no web source code (HTML or JavaScript/TypeScript) to wire'
+  if (d.kind === 'origin-engine-build') return "an og build output is generated by the engine: wire scores and saves in the project's src/ through og.platform and publish the project"
+  if (d.family?.id === 'godot' || d.kind === 'godot-export') return 'the project has no web source code (HTML or JavaScript/TypeScript) to wire'
   if (d.family?.generated) return `a ${d.family.label} export is generated by the engine, so there is no web source code to wire`
   if (d.kind === 'prebuilt') return 'the project has no web source code (HTML or JavaScript/TypeScript) to wire'
   return null
@@ -276,6 +286,14 @@ async function chooseProject(options: Options, ui: Ui, rules: Rules): Promise<Ch
             { value: existing.root, label: `Publish the WebGL build in ${existing.root || '.'}/ as it is` },
           ], '')
           if (how) detection = { ...detection, kind: 'unity-webgl', root: how, entry: existing.entry, existingExport: undefined, reasons: [...detection.reasons, `the existing WebGL build in ${how}/, as chosen`] }
+        }
+        const ogExisting = detection.kind === 'origin-engine' && !chosen.prebuilt ? detection.existingExport : undefined
+        if (ogExisting) {
+          const how = await ui.select<string>('It has an og build --publish output already. What should be published?', [
+            { value: '', label: 'Build it again with og build --publish first (Recommended)' },
+            { value: ogExisting.root, label: `Publish ${ogExisting.root}/ as it is` },
+          ], '')
+          if (how) return detect(chosen.projectDir, rules, path.join(chosen.projectDir, how))
         }
         return { ...chosen, detection }
       }
@@ -457,13 +475,15 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     // Build and stage from the workspace; `replay` re-applies the chosen adaptations to a fresh staged copy.
     const site = path.join(stageDir, 'site')
     const warnings: Warning[] = []
+    // An og build is published as og wrote it (Portal keeps its sw.js and manifest.webmanifest for engine origin-engine).
+    const originEngine = detection.engine === 'origin-engine'
     let chosen: PlanItem[] = []
     let codeEdits: Edit[] = []
     let codeFiles = new Set<string>()
     const prepare = async () => {
       const built = await buildProject(work, detection, stageDir, ui, prebuiltDir, projectDir)
       for (const w of built.warnings) ui.warn(w)
-      const staged = stageCopy(built.outputDir, site)
+      const staged = stageCopy(built.outputDir, site, originEngine ? readOgBuild(built.outputDir)?.files : undefined)
       if (staged.excluded.length) ui.info(`Left out of the upload: ${staged.excluded.slice(0, 8).map(e => `${e.path} (${e.reason})`).join(', ')}${staged.excluded.length > 8 ? ` and ${staged.excluded.length - 8} more` : ''}`)
       await precheck(site, built.entry, packCache, ui, rules.limits)
       return built
@@ -486,8 +506,10 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
     let built = await prepare()
     for (const message of built.warnings) warnings.push({ code: 'build.note', message })
-    const hasSource = detection.kind === 'node-build' || detection.kind === 'godot-project' || detection.kind === 'unity-project'
-    let findings = collectFindings(site, built.entry)
+    const hasSource = detection.kind === 'node-build' || detection.kind === 'origin-engine' || detection.kind === 'unity-project'
+    let findings = collectFindings(site, built.entry, { originEngine })
+    if (detection.family?.id === 'godot') warnings.push({ code: 'engine.godot_as_html', message: 'Godot is retired on OriginGame for new games; this Godot Web export is published as engine html, the static Web build it is, and nothing is wired into it' })
+    if (findings.og?.build === 'dev') warnings.push({ code: 'origin_engine.dev_build', message: 'this og build is a dev build (og build without --publish): it serves every probe member and has no service worker or web manifest, so it does not install as an app; run og build . --publish for the build that ships' })
     if (findings.unity?.compression === 'fallback') warnings.push({ code: 'unity.decompression_fallback', message: 'the Unity build uses Decompression Fallback (.unityweb), so every player\'s browser decompresses it in JavaScript before the game starts; turn Player Settings > Publishing Settings > Decompression Fallback off and rebuild for a faster start (OriginGame serves Brotli and gzip builds with their Content-Encoding)' })
     let { digest, reader } = buildDigest({ projectDir: work, site, detection, findings, hasSource })
     const client = new ModelClient(apiOrigin(host), active, usage)
@@ -506,7 +528,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
     analyzing.stop(analysis.summary.split('\n')[0]!.slice(0, 140))
     const stageFiles = new Set(listFiles(site))
-    const merged = mergePlan(findings, analysis, stageFiles)
+    const merged = mergePlan(findings, analysis, stageFiles, originEngine ? readOgBuild(site)?.files : null)
     for (const d of merged.dropped) warnings.push({ code: 'adapt.dropped', message: `plan item not applicable: ${d}` })
     chosen = await confirmPlan(ui, merged.items)
     const applied = applyItems(site, chosen, built.entry)
@@ -560,11 +582,11 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
         adaptations.push(...result.applied.map(f => `integrated ${f}`))
         built = await prepare()
         replay(built)
-        findings = collectFindings(site, built.entry)
+        findings = collectFindings(site, built.entry, { originEngine })
       }
     }
     const isolation = chosen.some(i => i.kind === 'cross_origin_isolation')
-    if (findings.threadReasons.length && !isolation && !stageFiles.has('origingame.runtime.json')) {
+    if (findings.threadReasons.length && !isolation && !stageFiles.has('origingame.runtime.json') && !findings.og) {
       warnings.push({ code: 'isolation.declined', message: 'the build looks threaded but cross-origin isolation was not declared; it may fail to start' })
     }
     const orientation = chosen.find(i => i.kind === 'orientation')?.value ?? 'any'

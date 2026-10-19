@@ -1,0 +1,156 @@
+{
+  "format": 1,
+  "engine": {
+    "name": "origin-engine",
+    "version": "0.0.1",
+    "pinned": "0.0.1"
+  },
+  "build": "publish",
+  "game": {
+    "name": "Tile Swap",
+    "id": "tile-swap",
+    "profile": "2d"
+  },
+  "entry": "index.html",
+  "worker": "game.js",
+  "wasm": "origin-engine_bg.wasm",
+  "probe": {
+    "protocol": 5,
+    "wire": 1,
+    "build": "publish",
+    "members": [
+      "hello",
+      "tick",
+      "state",
+      "pick",
+      "entity",
+      "input",
+      "capture"
+    ]
+  },
+  "crossOriginIsolation": "preferred",
+  "display": {
+    "fit": "fill",
+    "aspect": null,
+    "orientation": "portrait",
+    "dprCap": 2,
+    "fullscreen": "off",
+    "gate": "tap",
+    "madeWith": true
+  },
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "source": "brand"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "source": "brand"
+    }
+  ],
+  "pwa": {
+    "manifest": "manifest.webmanifest",
+    "serviceWorker": "sw.js"
+  },
+  "version": "6ecdee3d551db25041a9384ed8115dd40d598d562598e4f865c6fac3cd631c73",
+  "files": [
+    {
+      "path": "_headers",
+      "bytes": 414,
+      "sha256": "29ed934d148729c84419b657e42a718a29c479013af04058b9eb092992abbabe"
+    },
+    {
+      "path": "audio-worklet.js",
+      "bytes": 113,
+      "sha256": "87cb48eed79ee5286c3813e1eac6c257ebd403d88ed2756508fa490578f25cce"
+    },
+    {
+      "path": "basis/LICENSE",
+      "bytes": 79,
+      "sha256": "0ec55304ca70ec249012a0c26b737228c26b7f46b1d657d29eed80c9ef2a4692"
+    },
+    {
+      "path": "basis/basis_transcoder.js",
+      "bytes": 63,
+      "sha256": "19806e20970d9eaad70ef09ca1ae1916932ab5fb7cb2a70019b14c0135a22777"
+    },
+    {
+      "path": "basis/basis_transcoder.wasm",
+      "bytes": 8,
+      "sha256": "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
+    },
+    {
+      "path": "cooked/.cook.ogt",
+      "bytes": 188,
+      "sha256": "c703d6c61e186eef030d35d1aad4389a57e2ee17247aa5405c064b093cd2d16f"
+    },
+    {
+      "path": "cooked/scenes/main.ogt.ogb",
+      "bytes": 32,
+      "sha256": "9f79858c7e4c49bdd6ce38f71b5656981cf1f40d60eeee2b4d30e32bc584d05c"
+    },
+    {
+      "path": "cooked/sprites/tiles.png.ogb",
+      "bytes": 64,
+      "sha256": "937a3d099bd489fb4a3338396a9c24edb17c41b6dc5fa823c0cb2769e0171694"
+    },
+    {
+      "path": "game.js",
+      "bytes": 171,
+      "sha256": "9f0cd72e9d68ad76b40b438e8e71e4331b339d445896923770ea3381d04cbcf3"
+    },
+    {
+      "path": "icons/icon-192.png",
+      "bytes": 542,
+      "sha256": "7a818aa4943b646b06c280de6ff738e9d40eb6c084b92c8415083f8d647234fb"
+    },
+    {
+      "path": "icons/icon-512.png",
+      "bytes": 1943,
+      "sha256": "f0878a8b47a2a03ede7e9d5976615e7bea4d38089149e8edd1690b9089af9cd1"
+    },
+    {
+      "path": "index.html",
+      "bytes": 1272,
+      "sha256": "c17a9f21278498ea4799b4e5f5b5feac6ee5d9d9b96513b18f791f4d82acbf96"
+    },
+    {
+      "path": "manifest.webmanifest",
+      "bytes": 489,
+      "sha256": "a1d2a572690a7b378c10efa0b92b99b6abedbc72ee49bb6c23d38ed6d808992f"
+    },
+    {
+      "path": "origin-engine.js",
+      "bytes": 121,
+      "sha256": "7f3d6719bc79d1ce6f81e146f983f56310509c8087bb66bd442ce1834ebd2f35"
+    },
+    {
+      "path": "origin-engine_bg.wasm",
+      "bytes": 8,
+      "sha256": "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
+    },
+    {
+      "path": "origingame.runtime.json",
+      "bytes": 41,
+      "sha256": "46f1402a005facf5183452e8821bd69ec0c60e78e4dc09ef30f830dc06dad806"
+    },
+    {
+      "path": "play.js",
+      "bytes": 1545,
+      "sha256": "9d0d8f18c5d55e42da6ae07e571ce5443f1bd4b7dc1db96346764471a67665b4"
+    },
+    {
+      "path": "sw.js",
+      "bytes": 1323,
+      "sha256": "2f71ee6e8b65c051026606c188ff7097b437dc5c59a758e13f5941ba4390d1d9"
+    }
+  ],
+  "total": {
+    "files": 18,
+    "bytes": 8416
+  }
+}

@@ -10,7 +10,9 @@
     { "id": "html", "markers": ["index.html", "*.html"] }
   ],
   "families": [
+    {"id": "origin-engine", "label": "Origin Engine", "engine": "origin-engine", "generated": true, "markers": ["origin-engine_bg.wasm", "origin-engine.js", "project.ogt"]},
     {"id": "unity", "label": "Unity", "engine": "unity", "generated": true, "locate": true, "markers": ["Build/*.loader.js", "Build/UnityLoader.js", "*.html:createUnityInstance(", "*.html:UnityLoader.instantiate("]},
+    {"id": "godot", "label": "Godot", "engine": "html", "generated": true, "locate": true, "markers": ["*.pck+*.wasm+*.html:GODOT_CONFIG", "*.pck+*.wasm+*.html:new Engine("]},
     {"id": "construct3", "label": "Construct 3", "engine": "html", "generated": true, "locate": true, "markers": ["c3runtime.js", "c3main.js", "*.html:c3runtime"]},
     {"id": "construct2", "label": "Construct 2", "engine": "html", "generated": true, "locate": true, "markers": ["c2runtime.js"]},
     {"id": "gamemaker", "label": "GameMaker", "engine": "html", "generated": true, "locate": true, "markers": ["html5game/*.js", "*.html:GameMaker_Init"]},

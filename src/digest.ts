@@ -29,7 +29,7 @@ export interface Digest {
   findings: Omit<Findings, 'items'> & { planned: Array<{ id: string; kind: string; title: string; reason: string }> }
 }
 
-const SOURCE_SKIP = new Set(['node_modules', '.git', '.godot', '.import', 'dist', '.cache', '.vite', '.next', 'coverage'])
+const SOURCE_SKIP = new Set(['node_modules', '.git', '.godot', '.import', 'dist', '.cache', '.vite', '.next', 'coverage', 'cooked', 'og-out', '.og'])
 const MAX_LIST = 250
 const TOTAL_BUDGET = 120 * 1024
 
@@ -94,7 +94,7 @@ export function buildDigest(input: { projectDir: string; site: string; detection
 
   push(reader.read('build', 'index.html', 24 * 1024) ?? reader.read('build', detection.entry, 24 * 1024))
   if (sourceRoot) {
-    for (const name of ['package.json', 'vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'project.godot', 'ProjectSettings/ProjectVersion.txt', 'Packages/manifest.json', 'README.md']) {
+    for (const name of ['project.ogt', 'package.json', 'vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'project.godot', 'ProjectSettings/ProjectVersion.txt', 'Packages/manifest.json', 'README.md']) {
       if (sourceFiles.includes(name)) push(reader.read('source', name, name === 'README.md' ? 4 * 1024 : 8 * 1024))
     }
     if (sourceFiles.includes('export_presets.cfg')) {

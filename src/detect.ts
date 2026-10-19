@@ -1,23 +1,28 @@
 import path from 'node:path'
 import type { Engine } from './constants.js'
+import { OG_BUILD_MANIFEST, publishOut } from './og.js'
 import type { Family } from './rules.js'
 
 /**
  * Deterministic project detection: a pure function of the file list and a
  * few small file contents. No model is involved and nothing is executed.
  *
+ * - `origin-engine`: an Origin Engine project (`project.ogt` at the root), built with `og build . --publish`.
+ * - `origin-engine-build`: an `og build` output that is already there (`og-build.json`, the `og-engine`
+ *   meta, the engine's web host, or a marker of a family whose engine is `origin-engine`).
  * - `static`: hand-written HTML (or any page) served as-is from `root`.
  * - `prebuilt`: a build output that is already there (`dist/`, an engine's Web export …) with no build to run.
  * - `node-build`: a package with a `build` script (Vite, webpack, …), built into a scratch copy.
- * - `godot-export`: a Godot Web export (`.html` + `.pck` + `.wasm`).
- * - `godot-project`: a Godot project, exported with the local Godot editor when available.
+ * - `godot-export`: a Godot Web export (`.html` + `.pck` + `.wasm`), also one inside a Godot project's tree.
+ *   It publishes as `html`: Portal refuses `godot` for new games.
+ * - `godot-project`: a Godot project with no Web export in it, which the Wizard cannot publish.
  * - `unity-webgl`: a Unity WebGL build (a page beside `Build/*.loader.js`).
  * - `unity-project`: a Unity project (`Assets/` + `ProjectSettings/ProjectVersion.txt`), built for WebGL with the local Unity Editor.
  * - `native`: something OriginGame cannot publish (a Windows, macOS, Linux, Android or iOS build, or an engine
  *   project whose editor the Wizard cannot drive); `native` says what it is, so the caller can find the
  *   project it came from or explain how to export it for the Web.
  */
-export type ProjectKind = 'static' | 'prebuilt' | 'node-build' | 'godot-project' | 'godot-export' | 'unity-project' | 'unity-webgl' | 'native'
+export type ProjectKind = 'origin-engine' | 'origin-engine-build' | 'static' | 'prebuilt' | 'node-build' | 'godot-project' | 'godot-export' | 'unity-project' | 'unity-webgl' | 'native'
 
 export interface BuildPlan {
   packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun'
@@ -67,10 +72,12 @@ export interface Detection {
   build?: BuildPlan
   /** Output directories to look in after a node build, most specific first. */
   outputs: string[]
-  /** For a Godot or Unity project: a Web export already in the tree, used when no editor is available. */
+  /** For a Unity or Origin Engine project: a Web build already in the tree, used when no editor or `og` is available. */
   existingExport?: { root: string; entry: string }
   unity?: UnityFacts
   native?: NativeBuild
+  /** For an `og build` output: whether it is a `--publish` build (`publish`), a dev build (`dev`), or does not say (null). */
+  ogBuild?: 'publish' | 'dev' | null
   reasons: string[]
 }
 
@@ -85,7 +92,7 @@ export interface DetectInput {
   families?: Family[]
 }
 
-const IGNORED_SEGMENTS = new Set(['node_modules', '.git', '.godot', '.import', '.svn', '.hg', '.cache', '.vite', '.next', '.parcel-cache', '__MACOSX'])
+const IGNORED_SEGMENTS = new Set(['node_modules', '.git', '.godot', '.import', '.svn', '.hg', '.cache', '.vite', '.next', '.parcel-cache', '__MACOSX', '.og', 'og-out'])
 const OUTPUT_DIRS = ['dist', 'build', 'out', 'www', 'public']
 /** A Unity project's caches and build folders (top level only): never scanned, copied or uploaded as source. */
 export const UNITY_CACHE_DIRS = ['Library', 'Temp', 'Logs', 'obj', 'UserSettings', 'MemoryCaptures', 'Recordings']
@@ -188,6 +195,33 @@ function godotExportIn(files: string[], dir: string): { root: string; entry: str
   const html = names.filter(n => /\.html?$/i.test(n))
   if (!pck.length || !wasm || !html.length) return null
   return { root: dir, entry: entryOf(html, pck[0]!.replace(/\.pck$/i, '')) }
+}
+
+/**
+ * An Origin Engine build (`og build`, the engine's docs/web-export.md) in
+ * `dir`: `index.html` beside `og-build.json` naming `origin-engine`, or a page
+ * carrying the `og-engine` / `og-profile` meta, or the engine's web host
+ * (`origin-engine.js` + `origin-engine_bg.wasm`), or a marker of a rules
+ * family whose engine is `origin-engine`. `build` is `publish` or `dev` when
+ * the manifest or the `og-build` meta says which.
+ */
+function ogBuildIn(files: string[], dir: string, read: (file: string) => string | null, families: readonly Family[]): { root: string; entry: string; build: 'publish' | 'dev' | null; evidence: string } | null {
+  const names = directChildren(files, dir)
+  if (!names.includes('index.html')) return null
+  const at = (name: string) => join(dir, name)
+  const kind = (value: unknown) => (value === 'publish' || value === 'dev' ? value : null)
+  if (names.includes(OG_BUILD_MANIFEST)) {
+    let manifest: any = null
+    try { manifest = JSON.parse(read(at(OG_BUILD_MANIFEST)) ?? '') } catch { manifest = null }
+    if (manifest?.engine?.name === 'origin-engine') return { root: dir, entry: 'index.html', build: kind(manifest.build), evidence: OG_BUILD_MANIFEST }
+  }
+  const page = read(at('index.html')) ?? ''
+  const meta = /<meta\s[^>]*name=["']og-(?:engine|profile)["']/i.exec(page)
+  const build = kind(/<meta\s[^>]*name=["']og-build["'][^>]*content=["'](\w+)["']/i.exec(page)?.[1])
+  if (meta) return { root: dir, entry: 'index.html', build, evidence: 'the og-engine meta in index.html' }
+  if (names.includes('origin-engine.js') && names.includes('origin-engine_bg.wasm')) return { root: dir, entry: 'index.html', build, evidence: 'origin-engine.js + origin-engine_bg.wasm' }
+  const hit = classifyFamily(within(files, dir), f => read(at(f)), families, f => f.engine === 'origin-engine')
+  return hit ? { root: dir, entry: 'index.html', build, evidence: `${hit.family.label} marker "${hit.marker}"` } : null
 }
 
 /**
@@ -341,6 +375,34 @@ export function detectProject(input: DetectInput): Detection | null {
     const f = families.find(x => x.id === 'unity')
     return { id: 'unity', label: f?.label ?? 'Unity', generated: true }
   }
+  const ogFamily = (): Detection['family'] => {
+    const f = families.find(x => x.id === 'origin-engine') ?? families.find(x => x.engine === 'origin-engine')
+    return { id: f?.id ?? 'origin-engine', label: f?.label ?? 'Origin Engine', generated: true }
+  }
+  /** A Godot Web export is published as `html` (Portal refuses `godot` for new games); the family keeps its name. */
+  const godotFamily = (): Detection['family'] => {
+    const f = families.find(x => x.id === 'godot')
+    return { id: 'godot', label: f?.label ?? 'Godot', generated: true }
+  }
+  const ogBuildAt = (build: NonNullable<ReturnType<typeof ogBuildIn>>): Detection => {
+    reasons.push(`og build${build.build ? ` (${build.build})` : ''} output ${build.root ? `in ${build.root}` : 'at the project root'}: ${build.evidence}`)
+    return { kind: 'origin-engine-build', engine: 'origin-engine', family: ogFamily(), root: build.root, entry: build.entry, outputs: [], reasons, ogBuild: build.build }
+  }
+
+  if (has('project.ogt')) {
+    // An Origin Engine project: built with `og build . --publish` into project.ogt's publish.out (default dist/).
+    const out = publishOut(read('project.ogt'))
+    const outputs = [...new Set([...(out ? [out] : []), 'dist'])]
+    reasons.push('project.ogt at the project root (an Origin Engine project)')
+    const existing = outputs.map(o => ogBuildIn(files, o, read, families)).find(b => b !== null && b.build !== 'dev')
+    if (existing) reasons.push(`existing og build --publish output in ${existing.root}/`)
+    return {
+      kind: 'origin-engine', engine: 'origin-engine', family: ogFamily(), root: '', entry: 'index.html', outputs, reasons,
+      ...(existing ? { existingExport: { root: existing.root, entry: existing.entry } } : {}),
+    }
+  }
+  const rootOg = ogBuildIn(files, '', read, families)
+  if (rootOg) return ogBuildAt(rootOg)
 
   if (isUnityProjectTree(files)) {
     // The Unity project itself: its caches never count as part of it.
@@ -360,8 +422,12 @@ export function detectProject(input: DetectInput): Detection | null {
   if (has('project.godot')) {
     reasons.push('project.godot at the project root')
     const existing = exportDirs[0]
-    if (existing) reasons.push(`existing Web export in ${existing.root || '.'}`)
-    return { kind: 'godot-project', engine: 'godot', family: null, root: '', entry: 'index.html', outputs: [], reasons, ...(existing ? { existingExport: existing } : {}) }
+    if (existing) {
+      // The project's own Web export is what gets published; the Wizard never runs the Godot editor.
+      reasons.push(`its Web export in ${existing.root || '.'}`)
+      return { kind: 'godot-export', engine: 'html', family: godotFamily(), root: existing.root, entry: existing.entry, outputs: [], reasons }
+    }
+    return { kind: 'godot-project', engine: 'html', family: godotFamily(), root: '', entry: 'index.html', outputs: [], reasons }
   }
 
   const unityBuilds = candidateDirs(files).map(dir => unityWebglIn(files, dir)).filter((x): x is NonNullable<typeof x> => x !== null)
@@ -375,7 +441,7 @@ export function detectProject(input: DetectInput): Detection | null {
   const rootExport = exportDirs.find(e => e.root === '')
   if (rootExport) {
     reasons.push('Godot Web export (.html + .pck + .wasm) at the project root')
-    return { kind: 'godot-export', engine: engineOf(directChildren(files, ''), ''), family: null, root: '', entry: rootExport.entry, outputs: [], reasons }
+    return { kind: 'godot-export', engine: 'html', family: godotFamily(), root: '', entry: rootExport.entry, outputs: [], reasons }
   }
 
   let manifest: any = null
@@ -401,13 +467,16 @@ export function detectProject(input: DetectInput): Detection | null {
     return { kind: 'static', engine: n.engine, family: n.family, root: '', entry: 'index.html', outputs: [], reasons }
   }
 
+  const nestedOg = candidateDirs(files).filter(Boolean).map(dir => ogBuildIn(files, dir, read, families)).find(x => x !== null)
+  if (nestedOg) return ogBuildAt(nestedOg)
+
   const nestedUnity = unityBuilds[0]
   if (nestedUnity) return unityAt(nestedUnity)
 
   const nestedExport = exportDirs[0]
   if (nestedExport) {
     reasons.push(`Godot Web export in ${nestedExport.root}`)
-    return { kind: 'godot-export', engine: engineOf(directChildren(files, nestedExport.root), nestedExport.root), family: null, root: nestedExport.root, entry: nestedExport.entry, outputs: [], reasons }
+    return { kind: 'godot-export', engine: 'html', family: godotFamily(), root: nestedExport.root, entry: nestedExport.entry, outputs: [], reasons }
   }
 
   // An engine's Web export inside a larger folder (Construct, GameMaker, Cocos, Defold …), located by its family's markers.

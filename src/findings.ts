@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { listFiles, readText } from './files.js'
+import { readOgBuild, type OgBuild } from './og.js'
 import { readRuntime, RUNTIME_FILE, unityBuildIn, type UnityBuild } from './unity.js'
 import { THREAD_SIGNALS, wasmHead, wasmUsesSharedMemory } from './wasm.js'
 
@@ -51,6 +52,8 @@ export interface Findings {
   unity: UnityBuild | null
   /** The release's `origingame.runtime.json` as it is now (`invalid` when it cannot be read). */
   runtime: Record<string, unknown> | null | 'invalid'
+  /** An Origin Engine build's og-build.json facts (null for any other build): its kind and the isolation og was asked for. */
+  og: Pick<OgBuild, 'build' | 'isolation'> | null
 }
 
 const HTML_ATTR = /\b(src|href|poster|data-src|content)\s*=\s*(["'])(\/[^"'/][^"']*)\2/gi
@@ -82,15 +85,21 @@ export function absoluteRefs(file: string, text: string, exists: (p: string) => 
   return refs
 }
 
-/** Deterministic checks on the staged copy. Facts here are not left to the model. */
-export function collectFindings(site: string, entry: string): Findings {
+/**
+ * Deterministic checks on the staged copy. Facts here are not left to the model.
+ * An Origin Engine build (`originEngine`, with its og-build.json) is published
+ * as og wrote it: its own service worker is the PWA Portal keeps for it, and
+ * cross-origin isolation follows og-build.json, not a guess from the files.
+ */
+export function collectFindings(site: string, entry: string, options: { originEngine?: boolean } = {}): Findings {
   const files = listFiles(site)
   const present = new Set(files)
   const exists = (p: string) => present.has(p)
   const items: PlanItem[] = []
   const unity = unityBuildIn(site, present.has('index.html') ? 'index.html' : entry)
   const runtime = readRuntime(site)
-  const findings: Findings = { items, scriptAbsolute: [], threadReasons: [], externalOrigins: [], localhostRefs: [], serviceWorkerRegistrations: [], orientationHints: [], largeFiles: [], unity, runtime }
+  const og = options.originEngine ? readOgBuild(site) : null
+  const findings: Findings = { items, scriptAbsolute: [], threadReasons: [], externalOrigins: [], localhostRefs: [], serviceWorkerRegistrations: [], orientationHints: [], largeFiles: [], unity, runtime, og: og ? { build: og.build, isolation: og.isolation } : null }
   const external = new Set<string>()
 
   if (!present.has('index.html')) {
@@ -125,7 +134,7 @@ export function collectFindings(site: string, entry: string): Findings {
     if (ext !== '.js' && ext !== '.mjs') htmlRefs.push(...absoluteRefs(file, text, exists))
     if (ext !== '.css') {
       for (const [pattern, reason] of THREAD_SIGNALS) if (pattern.test(text)) findings.threadReasons.push(`${reason}:${file}`)
-      if (/navigator\.serviceWorker\.register\(/.test(text) && !godotSw && unity?.serviceWorker?.file !== file) findings.serviceWorkerRegistrations.push(file)
+      if (/navigator\.serviceWorker\.register\(/.test(text) && !godotSw && unity?.serviceWorker?.file !== file && !og?.files.has(file)) findings.serviceWorkerRegistrations.push(file)
       for (const m of text.matchAll(LOCALHOST)) if (findings.localhostRefs.length < 10) findings.localhostRefs.push(`${file}: ${m[0]}`)
       for (const m of text.matchAll(EXTERNAL)) external.add(m[1]!.toLowerCase())
       for (const m of text.matchAll(/(?:width|height)\s*[:=]\s*(\d{3,4})\b/g)) if (findings.orientationHints.length < 12 && ext !== '.html') findings.orientationHints.push(`${file}: ${m[0]}`)
@@ -150,7 +159,12 @@ export function collectFindings(site: string, entry: string): Findings {
     items.push({ id: 'relative-paths', kind: 'relative_paths', title: `Make ${htmlRefs.length} root-absolute path${htmlRefs.length === 1 ? '' : 's'} relative`, reason: `a release is served under /play/<game>/<release>/, so "/…" points outside it (${sample})`, recommended: true, paths: [...new Set(htmlRefs.map(r => r.file))], source: 'check' })
   }
   const declared = (field: string) => runtime !== null && runtime !== 'invalid' && runtime[field] === true
-  if (findings.threadReasons.length && !declared('crossOriginIsolated') && runtime !== 'invalid') {
+  if (og) {
+    // og writes origingame.runtime.json unless project.ogt says `isolation off`; an older og build may lack it.
+    if ((og.isolation === 'required' || og.isolation === 'preferred') && !declared('crossOriginIsolated') && runtime !== 'invalid') {
+      items.push({ id: 'isolation', kind: 'cross_origin_isolation', title: `Declare cross-origin isolation (og-build.json isolation: ${og.isolation})`, reason: `project.ogt asks for isolation ${og.isolation}, which og declares in ${RUNTIME_FILE}; this build has no such declaration, so it ${runtime ? `is added to ${RUNTIME_FILE}` : `writes ${RUNTIME_FILE}`} as og would`, recommended: true, required: true, source: 'check' })
+    }
+  } else if (findings.threadReasons.length && !declared('crossOriginIsolated') && runtime !== 'invalid') {
     items.push({ id: 'isolation', kind: 'cross_origin_isolation', title: 'Declare cross-origin isolation (threads / SharedArrayBuffer)', reason: `the build needs SharedArrayBuffer: ${findings.threadReasons.slice(0, 3).join(', ')}; ${runtime ? `adds crossOriginIsolated to ${RUNTIME_FILE}` : `writes ${RUNTIME_FILE}`} so Portal sends COOP/COEP for this release only`, recommended: true, source: 'check' })
   }
   if (unity && (unity.compression === 'brotli' || unity.compression === 'gzip') && !declared('precompressed') && runtime !== 'invalid') {

@@ -71,7 +71,7 @@ export function projectSkip(dir: string, names: ReadonlySet<string>, unityCaches
   return relative => names.has(path.posix.basename(relative)) || (unity && !relative.includes('/') && unityCaches.includes(relative))
 }
 
-const TEXT_EXTENSIONS = new Set(['.html', '.htm', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.json', '.md', '.txt', '.gd', '.cfg', '.godot', '.tres', '.tscn', '.svg', '.xml', '.yml', '.yaml', '.toml', '.vue', '.svelte', '.glsl', '.vert', '.frag', '.wgsl', '.cs', '.shader', '.hlsl', '.asmdef', '.uss', '.uxml'])
+const TEXT_EXTENSIONS = new Set(['.html', '.htm', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.json', '.md', '.txt', '.gd', '.cfg', '.godot', '.tres', '.tscn', '.svg', '.xml', '.yml', '.yaml', '.toml', '.vue', '.svelte', '.glsl', '.vert', '.frag', '.wgsl', '.cs', '.shader', '.hlsl', '.asmdef', '.uss', '.uxml', '.ogt'])
 
 export function isTextFile(file: string): boolean {
   return TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())

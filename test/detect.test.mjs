@@ -2,8 +2,8 @@
 // wrong bytes or none. Ways it can fail, each pinned below:
 // - a marker inside node_modules flips the engine;
 // - a stale dist/ hides a buildable project;
-// - a Godot project is mistaken for its (possibly stale) export, or the export
-//   is unusable when no editor is installed;
+// - a Godot project's own Web export in its tree is missed, or a Godot export
+//   is sent to Portal as `godot` (refused for new games) instead of `html`;
 // - an export in a subdirectory, or with an entry not named index.html, is missed;
 // - a lone page that is not index.html is not found;
 // - an empty tree is "detected";
@@ -16,7 +16,10 @@ import { test } from 'node:test'
 import { ROOT } from './helpers.mjs'
 
 const { detectProject, viteIsLast } = await import(path.join(ROOT, 'dist', 'detect.js'))
-const { engines } = JSON.parse(fs.readFileSync(path.join(ROOT, 'test', 'rules', 'rules.json'), 'utf8'))
+const { parseFamilies, validateRules } = await import(path.join(ROOT, 'dist', 'rules.js'))
+const rulesJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'test', 'rules', 'rules.json'), 'utf8'))
+// The engines as the CLI reads them (an older document's `godot` engine is not used).
+const { engines } = validateRules({ ...rulesJson, version: 'x', prompts: { system: 's', analyze: 'a', adapt: 'd', metadata: 'm', artwork: 'w' } })
 
 const detect = (tree) => detectProject({ files: Object.keys(tree), read: f => tree[f] ?? null, engines })
 
@@ -52,11 +55,16 @@ test('the Vite flags are only appended when vite build is the last command', () 
   assert.equal(viteIsLast('vite build; rm -rf /'), false)
 })
 
-test('a Godot project is detected as a project, and remembers an existing export for when no editor is installed', () => {
+test('a Godot project publishes its own Web export as html; without one it is a project the Wizard cannot publish', () => {
   const d = detect({ 'project.godot': '[application]', 'main.gd': '', 'export/web/index.html': 'GODOT_CONFIG', 'export/web/index.pck': '', 'export/web/index.wasm': '', 'export/web/index.js': '' })
-  assert.equal(d.kind, 'godot-project')
-  assert.equal(d.engine, 'godot')
-  assert.deepEqual(d.existingExport, { root: 'export/web', entry: 'index.html' })
+  assert.equal(d.kind, 'godot-export')
+  assert.equal(d.engine, 'html')
+  assert.equal(d.family.id, 'godot')
+  assert.equal(d.root, 'export/web')
+  assert.equal(d.entry, 'index.html')
+  const bare = detect({ 'project.godot': '[application]', 'main.gd': '', 'index.html': '<p>docs</p>' })
+  assert.equal(bare.kind, 'godot-project')
+  assert.equal(bare.engine, 'html')
 })
 
 test('a Godot export in a subdirectory with an entry named after the game is found', () => {
@@ -64,7 +72,7 @@ test('a Godot export in a subdirectory with an entry named after the game is fou
   assert.equal(d.kind, 'godot-export')
   assert.equal(d.root, 'build/web')
   assert.equal(d.entry, 'Lantern.html')
-  assert.equal(d.engine, 'godot')
+  assert.equal(d.engine, 'html')
 })
 
 test('a prebuilt dist/ with no build script is published as it is', () => {
@@ -102,8 +110,6 @@ test('the package manager follows the lockfile, and packageManager wins', () => 
 //   or its engine is misnamed so the wrong source project is looked for;
 // - the RPG Maker MV Windows deployment's www/ (a real Web game) is refused as a native build;
 // - an engine source project that the Wizard cannot build is "detected" as nothing at all.
-const { parseFamilies, validateRules } = await import(path.join(ROOT, 'dist', 'rules.js'))
-const rulesJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'test', 'rules', 'rules.json'), 'utf8'))
 const families = parseFamilies(rulesJson.families)
 const ENGINE_FIXTURES = path.join(ROOT, 'fixtures', 'engines')
 
@@ -202,4 +208,51 @@ test('rules: families are optional and lenient; engines still refuse an id Porta
   const lenient = validateRules({ ...base, families: [{ id: 'future', label: 'Future Engine', engine: 'future-engine', markers: ['future.js'] }, { id: 'BAD ID', markers: ['x'] }, { id: 'nomarkers', markers: [] }, 7] }).families
   assert.deepEqual(lenient, [{ id: 'future', label: 'Future Engine', engine: 'html', markers: ['future.js'], generated: false, locate: false }])
   assert.throws(() => validateRules({ ...base, engines: [...base.engines, { id: 'construct', markers: [] }] }), /unknown engine construct/)
+})
+
+// Origin Engine. Ways the detector can fail here, each pinned below:
+// - an Origin Engine project (project.ogt) with the template's package.json `build: og build .` is taken
+//   for a node build, so `npm run build` makes a dev build that is published as html;
+// - an og build output (at the root, in dist/ or wherever project.ogt's publish.out says) is published as
+//   a plain page or a wasm-bindgen export, so Portal gets `html` and strips the build's sw.js and manifest;
+// - an og build is missed when it has only some of its markers (the manifest, the meta, the web host);
+// - a dev build (`og build` without --publish) is offered as the existing build of a project;
+// - another wasm-bindgen game (`*_bg.wasm`) is taken for Origin Engine.
+const OG_DIST = path.join(ROOT, 'fixtures', 'origin-engine-dist')
+
+test('an Origin Engine project is built with og, whatever its package.json says, and remembers its publish build', () => {
+  const tree = treeOf(path.join(ROOT, 'fixtures', 'origin-engine-project'))
+  const d = detectAll(tree)
+  assert.deepEqual(summary(d), { kind: 'origin-engine', engine: 'origin-engine', family: 'origin-engine', root: '', entry: 'index.html' })
+  assert.equal(d.outputs[0], 'dist')
+  assert.equal(d.build, undefined)
+  assert.equal(d.existingExport, undefined)
+  // A publish build in dist/ is remembered; a dev build there is not.
+  const built = { ...tree, ...Object.fromEntries(Object.entries(treeOf(OG_DIST)).map(([f, t]) => [`dist/${f}`, t])) }
+  assert.deepEqual(detectAll(built).existingExport, { root: 'dist', entry: 'index.html' })
+  const dev = { ...built, 'dist/og-build.json': built['dist/og-build.json'].replace('"build": "publish"', '"build": "dev"') }
+  assert.equal(detectAll(dev).existingExport, undefined)
+  // project.ogt's publish.out names where the build goes.
+  const out = { ...tree, 'project.ogt': tree['project.ogt'].replace('out "dist"', 'out "build/web"') }
+  assert.deepEqual(detectAll(out).outputs, ['build/web', 'dist'])
+})
+
+test('an og build output is origin-engine-build at the root or nested, by its manifest, its meta or its web host', () => {
+  const dist = treeOf(OG_DIST)
+  const root = detectAll(dist)
+  assert.deepEqual(summary(root), { kind: 'origin-engine-build', engine: 'origin-engine', family: 'origin-engine', root: '', entry: 'index.html' })
+  assert.equal(root.ogBuild, 'publish')
+  const nested = detectAll({ 'README.md': '', ...Object.fromEntries(Object.entries(dist).map(([f, t]) => [`dist/${f}`, t])) })
+  assert.deepEqual(summary(nested), { kind: 'origin-engine-build', engine: 'origin-engine', family: 'origin-engine', root: 'dist', entry: 'index.html' })
+  // Each marker alone is enough.
+  const { 'og-build.json': _manifest, ...withoutManifest } = dist
+  assert.equal(detectAll(withoutManifest).kind, 'origin-engine-build')
+  assert.equal(detectAll(withoutManifest).ogBuild, 'publish', 'the og-build meta says which build it is')
+  assert.equal(detectAll({ 'index.html': '<meta name="og-profile" content="3d"><script type="module" src="./play.js"></script>', 'play.js': '' }).engine, 'origin-engine')
+  assert.equal(detectAll({ 'index.html': '<canvas></canvas>', 'origin-engine.js': '', 'origin-engine_bg.wasm': '' }).kind, 'origin-engine-build')
+  // Without the families (rules served to an older Wizard), the build itself still says what it is.
+  assert.equal(detectProject({ files: Object.keys(dist), read: f => dist[f] ?? null, engines }).engine, 'origin-engine')
+  // Another wasm-bindgen game is not Origin Engine.
+  const bevy = detectAll({ 'index.html': '<script type="module">import init from "./game.js"; init()</script>', 'game.js': 'wasm.__wbindgen_start()', 'game_bg.wasm': '' })
+  assert.deepEqual({ engine: bevy.engine, family: bevy.family.id }, { engine: 'html', family: 'wasm-bindgen' })
 })

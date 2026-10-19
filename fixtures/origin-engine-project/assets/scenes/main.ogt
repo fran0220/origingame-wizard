@@ -1,0 +1,6 @@
+type scene
+version 1
+---
+entity board {
+  grid { cols 8 rows 8 tile "sprites/tiles.png" }
+}

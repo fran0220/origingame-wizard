@@ -25,6 +25,8 @@ SDKs.
 - `src/unity.ts`: Unity Editor discovery, the batch-mode build script, the
   `Library/` cache, Unity build facts, `origingame.runtime.json` merging and
   Brotli packing of builds over the size limits.
+- `src/og.ts`: Origin Engine facts: `og-build.json`, `project.ogt`'s
+  `publish.out`, and finding `og`.
 - `src/native.ts`: native builds (messages, and the search for the project
   they came from).
 - `src/build.ts`, `src/stage.ts`: scratch-copy builds and the staged copy.

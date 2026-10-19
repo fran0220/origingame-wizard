@@ -139,7 +139,7 @@ export function applyItems(site: string, items: PlanItem[], entry: string): Appl
 /** Which project files the score and save integration may edit, as a refusal reason or null. */
 export function integrationRefusal(relative: string): string | null {
   const normalized = path.posix.normalize(relative.replace(/\\/g, '/'))
-  if (normalized.split('/').some(p => ['node_modules', '.git', 'dist', 'build', '.godot'].includes(p))) return 'generated or tooling directory'
+  if (normalized.split('/').some(p => ['node_modules', '.git', 'dist', 'build', '.godot', 'cooked', 'og-out', '.og'].includes(p))) return 'generated or tooling directory'
   if (isSecretFile(normalized)) return 'credential file'
   if (!isTextFile(normalized)) return 'not a source text file'
   return null
