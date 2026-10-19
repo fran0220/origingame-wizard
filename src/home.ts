@@ -91,7 +91,7 @@ export function forgetGame(projectDir: string): void {
 interface Settings { consent?: { version: number; at: string } }
 const settingsFile = () => path.join(homeDir(), 'settings.json')
 /** Bump when what is sent to the model changes in a way the person must agree to again. */
-export const CONSENT_VERSION = 2
+export const CONSENT_VERSION = 3
 
 export function hasConsented(): boolean {
   return (readJson<Settings>(settingsFile())?.consent?.version ?? 0) >= CONSENT_VERSION

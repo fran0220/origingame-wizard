@@ -1,7 +1,5 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { formatBytes, type Limits } from './constants.js'
-import { WizardError } from './errors.js'
 import { hashFile, listFiles, sha256 } from './files.js'
 import { isSecretFile } from './secrets.js'
 
@@ -30,14 +28,14 @@ export function exclusionReason(file: string): string | null {
  * even when hidden (an og build's `cooked/.cook.ogt`, the cook manifest the
  * engine loads first).
  */
-export function stageCopy(outputDir: string, site: string, keep?: ReadonlySet<string>): { files: string[]; excluded: Excluded[] } {
+export function stageCopy(outputDir: string, site: string, keep?: ReadonlySet<string> | 'hidden'): { files: string[]; excluded: Excluded[] } {
   fs.rmSync(site, { recursive: true, force: true })
   fs.mkdirSync(site, { recursive: true })
   const excluded: Excluded[] = []
   const files: string[] = []
   for (const file of listFiles(outputDir, new Set(['.git', 'node_modules']))) {
     const reason = exclusionReason(file)
-    if (reason && !(reason === 'hidden file' && keep?.has(file))) { excluded.push({ path: file, reason }); continue }
+    if (reason && !(reason === 'hidden file' && (keep === 'hidden' || keep?.has(file)))) { excluded.push({ path: file, reason }); continue }
     const target = path.join(site, file)
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(outputDir, file), target)
@@ -72,30 +70,4 @@ export async function stageManifest(site: string): Promise<Manifest> {
   entries.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
   const json = JSON.stringify({ version: 1, files: entries })
   return { entries, hash: sha256(json), totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local }
-}
-
-/** The same limits from sizes alone (no hashing), right after staging and before any model call. */
-export function precheckPortalLimits(site: string, limits: Limits): void {
-  const entries = listFiles(site).map(file => ({ path: file.normalize('NFC'), sizeBytes: fs.statSync(path.join(site, file)).size, sha256: '' }))
-  const ignoreEntry = { entries: entries.some(e => e.path === 'index.html') ? entries : [...entries, { path: 'index.html', sizeBytes: 0, sha256: '' }] }
-  checkPortalLimits({ ...ignoreEntry, hash: '', totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local: new Map() }, limits)
-}
-
-/** Fails before any upload (or model spend) when Portal would refuse the files. */
-export function checkPortalLimits(manifest: Manifest, limits: Limits): void {
-  const { entries } = manifest
-  const { maxFiles, maxFileBytes, maxTotalBytes } = limits.portal
-  if (!entries.some(e => e.path === 'index.html')) throw new WizardError('upload_failed', 'the staged build has no index.html at its root')
-  if (entries.length > maxFiles) throw new WizardError('upload_failed', `the build has ${entries.length} files; OriginGame accepts at most ${maxFiles.toLocaleString('en-US')}`)
-  if (manifest.totalBytes > maxTotalBytes) throw new WizardError('upload_failed', `the build is ${(manifest.totalBytes / 1048576).toFixed(1)} MiB; OriginGame accepts at most ${formatBytes(maxTotalBytes)} in total`)
-  const folded = new Set<string>()
-  for (const entry of entries) {
-    if (entry.sizeBytes > maxFileBytes) throw new WizardError('upload_failed', `${entry.path} is ${(entry.sizeBytes / 1048576).toFixed(1)} MiB; OriginGame accepts files up to ${formatBytes(maxFileBytes)}`)
-    if (entry.path.length > 1024 || entry.path.includes('%') || entry.path.includes('\\') || /[\x00-\x1f\x7f]/.test(entry.path)) {
-      throw new WizardError('upload_failed', `OriginGame does not accept the file name ${JSON.stringify(entry.path)} (no %, backslash or control characters); rename it in your project`)
-    }
-    const lower = entry.path.toLocaleLowerCase('en-US')
-    if (folded.has(lower)) throw new WizardError('upload_failed', `two files differ only in letter case (${entry.path}); OriginGame needs case-unique names`)
-    folded.add(lower)
-  }
 }

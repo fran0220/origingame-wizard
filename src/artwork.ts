@@ -6,8 +6,17 @@ import { acceptable, normalizeImage, type ImageKind } from './image.js'
 import type { ModelClient } from './model.js'
 import { openInBrowser } from './open.js'
 import { parseSize, type Rules } from './rules.js'
-import { ARTWORK_SCHEMA, type Metadata } from './tasks.js'
+import type { Schema } from './schema.js'
 import type { Ui } from './ui.js'
+
+/** The listing of a new game, as the publishing loop wrote it. */
+export interface Metadata { title: string; tagline: string; description: string; genre: string; tags: string[]; controls: string; languages?: string[]; input_hints?: string[]; aspect?: string; art_direction?: string }
+
+const ARTWORK_SCHEMA: Schema = {
+  type: 'object',
+  required: ['cover', 'poster'],
+  properties: { cover: { type: 'array', items: { type: 'string' } }, poster: { type: 'array', items: { type: 'string' } } },
+}
 
 export interface Artwork { cover: Buffer; poster: Buffer; coverPath: string; posterPath: string }
 

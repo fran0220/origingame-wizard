@@ -14,6 +14,7 @@ export type ErrorCode =
   | 'readiness_failed'
   | 'rules_unavailable'
   | 'aigcc_refused'
+  | 'agent_stopped'
   | 'aborted'
   | 'invalid_arguments'
 

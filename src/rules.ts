@@ -1,4 +1,4 @@
-import { DEFAULT_LIMITS, LIMIT_BOUNDS, PORTAL_ENGINES, RULES_PATH, type Engine, type Limits } from './constants.js'
+import { DEFAULT_LIMITS, LIMIT_BOUNDS, RULES_PATH, type Limits } from './constants.js'
 import { WizardError } from './errors.js'
 import { request } from './http.js'
 
@@ -13,65 +13,26 @@ export interface ImageRule {
 }
 
 /**
- * A game family: an engine or framework the Wizard names to the person
- * ("Construct 3", "Unity", "Phaser") while Portal receives `engine`, one of
- * its catalog ids. Served under `families`, a key Wizard 0.1–0.3 ignore: those
- * versions refuse the whole document when `engines` names an id they do not
- * know, so `engines` keeps only `html`, `threejs` and `godot`, and Origin
- * Engine is the family `origin-engine` (engine `origin-engine`).
+ * What this version reads from the platform's rules document: the models,
+ * the goal prompt, the artwork prompt, genres and Portal's limits. The
+ * document also carries keys older Wizards need (`engines`, `families`, the
+ * 0.5 task prompts); this version ignores them.
  */
-export interface Family {
-  id: string
-  label: string
-  /** The Portal engine id this family publishes as (`html` when Portal has none of its own). */
-  engine: Engine
-  /** Same syntax as engine markers; a part with a `/` matches a path relative to the scanned root. */
-  markers: string[]
-  /** The published files are an engine's generated export, not hand-written source: no score/save wiring. */
-  generated: boolean
-  /** A matching marker also locates the export's root directory inside a larger folder. */
-  locate: boolean
-}
-
 export interface Rules {
   version: string
-  models: { analyze: string; deep: string; image: string }
+  /** `agent` drives the publishing loop; `analyze` writes artwork prompts; `image` draws. */
+  models: { agent: string; analyze: string; image: string }
   images: { cover: ImageRule; poster: ImageRule }
-  prompts: { system: string; analyze: string; adapt: string; metadata: string; artwork: string }
-  engines: Array<{ id: Engine; markers: string[] }>
-  families: Family[]
+  prompts: { agent: string; system: string; artwork: string }
   genres: string[]
-  /** Portal's upload limits and the upload concurrency (`limits`, 0.5.0; older versions ignore it). */
   limits: Limits
 }
 
-const FAMILY_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
-
 /**
- * `families` is optional and read leniently, so the document can grow without
- * breaking this version: a malformed entry is skipped, and an engine this
- * version does not know publishes as `html`.
- */
-export function parseFamilies(value: unknown): Family[] {
-  if (!Array.isArray(value)) return []
-  const out: Family[] = []
-  for (const raw of value) {
-    if (!raw || typeof raw !== 'object') continue
-    const f = raw as Record<string, unknown>
-    if (typeof f.id !== 'string' || !FAMILY_ID.test(f.id) || out.some(x => x.id === f.id)) continue
-    if (!Array.isArray(f.markers) || !f.markers.length || f.markers.some(m => typeof m !== 'string' || !m)) continue
-    const label = typeof f.label === 'string' && f.label.trim() ? f.label.trim().slice(0, 60) : f.id
-    const engine = (PORTAL_ENGINES as readonly string[]).includes(f.engine as string) ? f.engine as Engine : 'html'
-    out.push({ id: f.id, label, engine, markers: f.markers as string[], generated: f.generated === true, locate: f.locate === true })
-  }
-  return out
-}
-
-/**
- * `limits` is optional and read leniently, like `families`: a missing or
- * malformed value keeps this version's default, and a number outside
- * `LIMIT_BOUNDS` is clamped into it, so a typo in the document can neither
- * stop every run nor make the Wizard open thousands of connections.
+ * `limits` is read leniently: a missing or malformed value keeps this
+ * version's default, and a number outside `LIMIT_BOUNDS` is clamped into it,
+ * so a typo in the document can neither stop every run nor make the Wizard
+ * open thousands of connections.
  */
 export function parseLimits(value: unknown): Limits {
   const section = <K extends keyof Limits>(key: K): Limits[K] => {
@@ -119,27 +80,22 @@ function imageRule(value: any, name: string): ImageRule {
 export function validateRules(value: any): Rules {
   if (!value || typeof value !== 'object') fail('not an object')
   const prompts = value.prompts ?? {}
-  const engines = Array.isArray(value.engines) ? value.engines : fail('engines missing')
-  // `godot` may still be served to older Wizards; it is never declared (Portal refuses it), so its markers are not used.
-  const parsedEngines = engines.filter((engine: any) => engine?.id !== 'godot').map((engine: any) => {
-    if (!PORTAL_ENGINES.includes(engine?.id)) fail(`unknown engine ${engine?.id}`)
-    if (!Array.isArray(engine.markers) || engine.markers.some((m: unknown) => typeof m !== 'string')) fail(`engine ${engine.id} markers`)
-    return { id: engine.id as Engine, markers: engine.markers as string[] }
-  })
-  const genres = Array.isArray(value.genres) && value.genres.every((g: unknown) => typeof g === 'string') ? value.genres as string[] : fail('genres missing')
+  const genres = Array.isArray(value.genres) && value.genres.every((g: unknown) => typeof g === 'string') && value.genres.length ? value.genres as string[] : fail('genres missing')
+  const analyze = str(value.models?.analyze, 'models.analyze')
   return {
     version: str(value.version, 'version'),
-    models: { analyze: str(value.models?.analyze, 'models.analyze'), deep: str(value.models?.deep, 'models.deep'), image: str(value.models?.image, 'models.image') },
+    models: {
+      // A document from before 0.6 has no `agent` model: its `deep` model drives the loop.
+      agent: typeof value.models?.agent === 'string' && value.models.agent.trim() ? value.models.agent : typeof value.models?.deep === 'string' ? value.models.deep : analyze,
+      analyze,
+      image: str(value.models?.image, 'models.image'),
+    },
     images: { cover: imageRule(value.images?.cover, 'cover'), poster: imageRule(value.images?.poster, 'poster') },
     prompts: {
+      agent: str(prompts.agent, 'prompts.agent (this platform does not serve Origin Wizard 0.6 yet; use npx origingame@0.5)'),
       system: str(prompts.system, 'prompts.system'),
-      analyze: str(prompts.analyze, 'prompts.analyze'),
-      adapt: str(prompts.adapt, 'prompts.adapt'),
-      metadata: str(prompts.metadata, 'prompts.metadata'),
       artwork: str(prompts.artwork, 'prompts.artwork'),
     },
-    engines: parsedEngines,
-    families: parseFamilies(value.families),
     genres,
     limits: parseLimits(value.limits),
   }

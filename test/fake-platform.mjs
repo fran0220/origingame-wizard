@@ -27,7 +27,7 @@ const sha256 = data => createHash('sha256').update(data).digest('hex')
 export function composeRules(dir, patch = {}) {
   const rules = JSON.parse(fs.readFileSync(path.join(dir, 'rules.json'), 'utf8'))
   const prompts = {}
-  for (const name of ['system', 'analyze', 'adapt', 'metadata', 'artwork']) prompts[name] = fs.readFileSync(path.join(dir, 'prompts', `${name}.md`), 'utf8')
+  for (const name of fs.readdirSync(path.join(dir, 'prompts')).filter(n => n.endsWith('.md')).sort()) prompts[name.slice(0, -3)] = fs.readFileSync(path.join(dir, 'prompts', name), 'utf8')
   const body = JSON.parse(JSON.stringify({ ...rules, prompts, ...patch }))
   return { version: sha256(JSON.stringify(body)).slice(0, 16), ...body }
 }
@@ -92,6 +92,7 @@ export async function startPlatform({ rulesDir }) {
     readiness422: false,
     readinessSequence: null,
     script: () => { throw new Error('no model script') },
+    agentScript: () => { throw new Error('no agent script') },
     // Top-level keys the served rules replace (e.g. { limits: {...} }); Portal then enforces the served limits.
     rulesPatch: null,
     // Portal's source-upload file route: how long each PUT is held, how many overlap, and failures to inject.
@@ -396,6 +397,13 @@ export async function startPlatform({ rulesDir }) {
       const input = JSON.parse(raw.toString())
       state.chat.push({ model: input.model, body: input, session: session.session_id })
       if (!session.models.includes(input.model)) return fail(res, 403, 'model_not_allowed', `model ${input.model} not allowed`)
+      if (Array.isArray(input.tools)) {
+        // The publishing loop: the scripted agent answers each turn with text and tool calls.
+        const turn = input.messages.filter(m => m.role === 'assistant').length + 1
+        const answer = await state.agentScript({ turn, messages: input.messages, tools: input.tools, last: input.messages.at(-1) })
+        const message = { role: 'assistant', content: answer.content ?? '', ...(answer.calls?.length ? { tool_calls: answer.calls.map((c, i) => ({ id: `call_${turn}_${i}`, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) } })) } : {}) }
+        return json(res, 200, { id: 'chatcmpl-fixture', object: 'chat.completion', model: input.model, choices: [{ index: 0, message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: Math.ceil(raw.length / 4), completion_tokens: 20, total_tokens: 0 } })
+      }
       const user = input.messages.at(-1).content
       const first = input.messages.find(m => m.role === 'user').content
       const task = /^TASK: (\w+)/.exec(first)?.[1]

@@ -1,187 +1,68 @@
 # Origin Wizard
 
-Publish your web game to [OriginGame](https://origingame.ai). In your game's folder:
+Publish your game to [OriginGame](https://origingame.ai). In your game's folder:
 
 ```sh
 npx origingame
 ```
 
-and answer the questions. The first one is how to publish:
+Origin Wizard is an AI agent with one goal: **your game is published on
+OriginGame and plays**. It looks at the project, builds it if it needs
+building, adapts it to the platform, publishes it, and when the build fails,
+Portal refuses the upload or the platform's readiness check says the game does
+not start, it reads what went wrong, fixes it and publishes again. It ends
+when the game plays, or tells you exactly what you must do when it cannot be
+published from this machine (for example a native build with no project to
+build for the Web).
 
-- **Automatic** (the default, press Enter): publish with the recommended
-  settings. The Wizard shows the plan in one line, then asks nothing more except
-  what nobody may skip: the browser sign-in when you are not signed in, the
-  data notice on your first run, and a confirmation when a file in the build
-  looks like a credential.
-- **Manual**: choose each setting: the folder and what to publish from it, the
-  account, a new game or which of your games to update, whether to save the
-  source, which adaptations to apply, whether to wire leaderboards and cloud
-  saves, the title, genre and description, the cover and poster, and who can
-  find the game; then a review before anything is uploaded.
+The first question is how to publish:
 
-The Wizard finds the game, builds it if it needs building, adapts it so it runs
-inside the OriginGame Player, wires leaderboards and cloud saves, saves your
-source to a private repository of yours, writes the store listing, draws a
-cover and a poster, and publishes it. **Your folder is never changed**: in a Git
-repository every change is a commit on a branch `origingame/publish` in a
-separate worktree, which you review and merge when you want; outside Git the
-changes stay in a copy. The model and image costs are paid by OriginGame, not
-by you.
+- **Automatic** (the default, press Enter): the agent decides and runs what it
+  needs (installs, builds, engine exports) in its copy of your project. Only
+  what nobody may skip is asked: the browser sign-in when you are not signed
+  in, the data notice on your first run, and a confirmation when a file in the
+  build looks like a credential.
+- **Manual**: you confirm every command before it runs, choose the game to
+  update, the source upload, the title, genre and description, the cover and
+  poster and who can find the game, and review before the first upload; the
+  agent may also ask you questions.
 
-It works with:
+**Your folder is never changed**: in a Git repository the agent works in a
+worktree on the branch `origingame/publish` and its changes are one commit you
+review and merge when you want; outside Git it works on a copy. The model and
+image costs are paid by OriginGame, not by you.
 
-| Project | How it is recognized | What happens |
-|---|---|---|
-| Plain HTML / canvas games | `index.html` (or a single page) at the root | published as is, after adaptation |
-| Vite, three.js and other npm builds | `package.json` with a `build` script | built in a scratch copy (`--base ./` for Vite), then published |
-| Origin Engine projects | `project.ogt` | built with `og build --publish` in a scratch copy (the project's `node_modules/.bin/og` from `@origingame/engine`, `OG=/path/to/og`, or `og` on `PATH`), or the existing `og build --publish` output is used; published as engine `origin-engine` exactly as og wrote it (see [Origin Engine](#origin-engine)) |
-| Origin Engine builds | `og-build.json` (or `origin-engine.js` with `origin-engine_bg.wasm`) beside `index.html`, at the root, in a subfolder or as `--prebuilt` | published as engine `origin-engine`, as og wrote it |
-| Godot Web exports | an `.html` beside a `.pck` and a `.wasm` | published as engine `html` (Portal no longer takes new Godot releases), with thread builds declared cross-origin isolated |
-| Godot projects | `project.godot` | the Web export in the project is published; without one the run stops: export for the Web in the Godot editor first |
-| Unity WebGL builds | `index.html` with `Build/*.loader.js` (or a legacy `UnityLoader.js`), at the root, in a subfolder or as `--prebuilt` | published as is; a compressed build is declared precompressed, a threaded one cross-origin isolated (see [Unity](#unity)) |
-| Unity projects | `Assets/` and `ProjectSettings/ProjectVersion.txt` | built for WebGL in batch mode with your local Unity Editor, or the existing WebGL build is used |
-| Other engines' Web exports | the engine's own files (below) | published as is, with the engine named in the plan |
-| Prebuilt output | `dist/`, `build/`, `out/` … with an `index.html`, or `--prebuilt <dir>` | published as is |
-| Native builds (Windows `.exe`, macOS `.app`, Linux, Android `.apk`/`.aab`, iOS Xcode) | the executable and its data folder | never uploaded: the Wizard switches to the Unity project beside it (or a Godot project's Web export), or says how to export for the Web |
-
-Web exports of other engines are recognized by their files, and the catalog
-engine Portal receives stays one of `html`, `origin-engine`, `threejs`, `unity` (the
-engine's name is shown in the plan and returned as `family`):
-
-| Engine or framework | Recognized by | Catalog engine |
-|---|---|---|
-| Construct 3 / Construct 2 | `c3runtime.js` or `c3main.js` / `c2runtime.js` | html |
-| GameMaker (HTML5) | `html5game/*.js`, or `GameMaker_Init` in the page | html |
-| Cocos Creator (web-mobile, web-desktop) | `cocos2d-js*.js`, `cocos-js/cc*.js`, or `src/settings*` with the application script | html |
-| Defold (HTML5 bundle) | `dmloader.js`, or `EngineLoader.load(` in the page | html |
-| PlayCanvas | `__start__.js` with `config.json`, or `playcanvas*.js` | html |
-| RPG Maker MZ / MV | `js/rmmz_core.js` / `js/rpg_core.js` | html |
-| Ren'Py (Web) | `renpy.wasm`, `renpy.js` with `game.zip`, or `renpy-pre.js` | html |
-| PICO-8 (HTML export) | `_cartdat` in the script, or the page's `pico8_buttons` | html |
-| Twine | a story page with `<tw-storydata` (or TiddlyWiki's `storeArea`) | html |
-| Rust + wasm-bindgen (Bevy, Leptos …) | `*_bg.wasm`, or `__wbindgen` in the JS glue | html |
-| Emscripten (C/C++, raylib, SDL) | a `.wasm` with Emscripten's JS glue or page | html |
-| Phaser, PixiJS, Babylon.js | the library file, or the dependency in `package.json` | html |
-
-The markers and labels in this table are part of the platform's
-Wizard rules, so new engines are added there without a new Wizard release.
+Any static Web game can be published: hand-written HTML/canvas games, npm
+projects (Vite, webpack, three.js, Phaser, PixiJS, Babylon.js …), Origin
+Engine projects and their `og build --publish` output, Unity WebGL builds (and
+Unity projects, with your own Unity Editor), Godot Web exports (and Godot
+projects, with your Godot editor and export templates), and the HTML5 exports
+of Construct, GameMaker, Cocos Creator, Defold, PlayCanvas, RPG Maker, Ren'Py,
+PICO-8, Twine, Emscripten or wasm-bindgen. There is no list of supported
+engines in the Wizard: the agent works out what the project is from its files.
 
 ## How it works
 
-1. **Detect** (no AI): engine, entry page, build command and output directory, from the files.
-2. **Sign in** once in your browser (device authorization; the device appears on your account's Devices page and can be revoked there). The device credential is stored in `~/.origingame/credentials.json` with mode `0600`.
-3. **Session**: each run gets a short platform-funded Wizard session (at most 30 minutes, a fixed model allowlist and a per-run budget). It lives only in memory and is revoked when the run ends, also when it fails or you press Ctrl-C.
-4. **Consent**: the first run shows exactly what will be sent and asks you to agree (`--yes` counts as agreeing).
-5. **Workspace**: in a Git repository, a worktree of the repository on the branch `origingame/publish` under `~/.origingame/worktrees/`, created from your HEAD and advanced to it on later runs (if your latest commit does not merge cleanly, the branch starts again from it). Your uncommitted changes and untracked files are copied in so the build matches what you see, but they are never committed. Your checkout, index and current branch are never touched. Outside Git, a copy under `~/.origingame/stage/`.
-6. **Build** with your own build command, from the workspace.
-7. **Analyze**: DeepSeek reads a bounded digest of the build and proposes an adaptation plan. Deterministic checks run first and their findings cannot be overridden by the model.
-8. **Adapt** (always): root-absolute paths made relative, cross-origin isolation declared for threaded WebAssembly (`origingame.runtime.json`), a Godot export's service worker turned off, a stale OriginGame entry config removed, and small exact code edits. Automatic takes the required and recommended items; Manual lets you leave out the optional ones. Where the published files are your own files (HTML games, exports in the tree) the changes are committed as `origingame: adapt for OriginGame`; for built projects they apply to the build output.
-9. **Integrate** (by default; `--no-integrate` or Manual's No turns it off): DeepSeek wires leaderboards and cloud saves to the Player protocol in the workspace's source, shows the diff and commits it as `origingame: wire leaderboards and cloud saves`. If the integrated build does not become ready in the Player, the Wizard drops that commit, publishes the adaptation-only build instead and reports why; the publication never fails because of the integration.
-10. **Artwork**: DeepSeek writes prompts and Qwen Image Turbo draws from text only (no screenshots), each image cropped and scaled locally to 1280×720 (cover, 16:9) and 1080×1440 (poster, 3:4). In Manual, 3 cover and 2 poster candidates to pick from in the terminal, with a local preview page; Automatic and `--yes` draw one of each.
-11. **Publish**: the source goes to your private repository (below), the build is uploaded content-addressed (an update uploads only changed files; files are streamed from disk, eight at a time by default, and an upload Portal ends partway resumes with what is still missing), the game is created or updated, and the Wizard waits for the readiness check, then prints the play link and how to review (`git diff HEAD...origingame/publish`) and keep (`git merge origingame/publish`) the branch.
+1. **Sign in** once in your browser (device authorization; the device appears on your account's Devices page and can be revoked there). The device credential is stored in `~/.origingame/credentials.json` with mode `0600`. `OG_API_KEY` (an `og-` account key) works too.
+2. **Session**: each run gets a short platform-funded Wizard session (at most 30 minutes, a fixed model allowlist and a per-run budget). It lives only in memory and is revoked when the run ends, also when it fails or you press Ctrl-C.
+3. **Consent**: the first run shows exactly what will be sent and asks you to agree (`--yes` counts as agreeing).
+4. **Workspace**: in a Git repository, a worktree of the repository on `origingame/publish` under `~/.origingame/worktrees/`, created from your HEAD and advanced to it on later runs. Your uncommitted changes and untracked files are copied in so the build matches what you see, but they are never committed. Outside Git, a copy under `~/.origingame/stage/`.
+5. **The agent** (DeepSeek through the OriginGame AI Gateway) gets the goal, the platform's rules (served by the platform at `/wizard/v1/rules.json`, so they change without a new Wizard release) and tools: list, read, search, write, edit, move and delete files in the workspace; run commands there; preview a folder in a local headless Chrome, Chromium or Edge (served the way OriginGame serves a release, reporting exceptions, console errors, failed requests and whether anything was drawn; `CHROME_PATH` names the browser); and publish.
+6. **Publish** stages the folder (credential files, `.git` and `node_modules` left out), uploads it content-addressed (an update uploads only changed files; files are streamed from disk, eight at a time by default, and an upload Portal ends partway resumes with what is still missing), creates or updates the game, and waits for the platform's readiness check (the game opened in the real Player). Whatever Portal answers goes back to the agent as it is: Portal enforces the limits and formats, the agent fixes and publishes again. A new game's listing is written by the agent from the files, and a cover and a poster are drawn from text only (no screenshots) and cropped to 1280×720 and 1080×1440.
+7. **Done**: the play link, the agent's summary of what it changed and why, and how to review (`git diff HEAD...origingame/publish`) and keep (`git merge origingame/publish`) the branch.
 
 The next run in the same directory updates the same game: its id is remembered in
-`~/.origingame/projects.json`, the current release revision is read, and the
-update is sent with `expected_revision`, so a change made elsewhere in the
-meantime is never overwritten. An update keeps the listing and artwork you have.
+`~/.origingame/projects.json`, and the update is sent with the release revision
+it read, so a change made elsewhere in the meantime is never overwritten. An
+update keeps the listing and artwork you have.
 
-## Unity
+## What the agent sees and does, and what it does not
 
-**A WebGL build** (the folder Unity writes: `index.html`, `Build/`,
-`TemplateData/`, maybe `StreamingAssets/`) is published as Unity wrote it.
-Run `npx origingame` in that folder, in a folder above it, or pass
-`--prebuilt <dir>`.
-
-- Any **Compression Format** works. A Brotli (`.br`) or gzip (`.gz`) build is
-  declared `"precompressed": true` in `origingame.runtime.json`, and the Player
-  serves those files with their `Content-Encoding`. Turn **Decompression
-  Fallback** off: the Wizard warns when a build uses it (`.unityweb`), because
-  the browser then decompresses in JavaScript, which is slower.
-- A build with **WebGL threads** (shared memory, found by reading the
-  `.wasm` itself, compressed or not) is also declared cross-origin isolated.
-  An existing `origingame.runtime.json` is merged, never replaced.
-- OriginGame accepts **512 MiB per file, 1 GiB and 20,000 files in total**
-  (the platform's rules name the current limits, and the Wizard's messages
-  quote them). An uncompressed build over those limits is Brotli-compressed
-  by the Wizard for that release (the loader references in `index.html` are
-  updated and the build is declared precompressed; your folder is not
-  changed). If it does not fit even compressed, the Wizard says which files
-  are too large and what to change in Unity (Brotli, code stripping, texture
-  compression, moving content to Addressables).
-- The page template may get small edits so the canvas fills the Player's
-  frame; the Unity PWA template's service worker is turned off, because the
-  Player owns caching. `Build/` files are never edited.
-- Leaderboards and cloud saves are not wired into Unity games (the Wizard
-  cannot edit and rebuild C#); the game is published without them.
-
-**A Unity project** (`Assets/`, `ProjectSettings/ProjectVersion.txt`) is
-built for WebGL in batch mode with your own Unity Editor:
-
-- The editor is the one set in `UNITY` (path to the Unity executable or its
-  install folder), else the Unity Hub install of exactly the version in
-  `ProjectVersion.txt` (default Hub locations and a custom Hub install path),
-  else `Unity` on `PATH`. The **WebGL Build Support** module must be
-  installed. When something is missing the Wizard prints the Unity Hub steps
-  (including a `unityhub://` link for the exact version) and, if the project
-  already has a WebGL build, publishes that one instead.
-- The build runs in a scratch copy of the project, with a small build script
-  (`Assets/OriginGameWizard/Editor/`) added only to that copy. It builds the
-  scenes enabled in Build Settings. Your project is never changed.
-- The first build of a project imports every asset and can take a long time.
-  The time limit is 180 minutes (`ORIGINGAME_UNITY_TIMEOUT_MINUTES`). To make
-  later builds fast, the Wizard keeps the copy's `Library/` import cache in
-  `~/.origingame/unity/<project>/Library` (seeded from your project's own
-  `Library/` on the first run). It can be large; delete
-  `~/.origingame/unity/` at any time to reclaim the space.
-- Unity needs an activated license in batch mode; an unlicensed editor, a
-  compile error or a failed build is reported with the lines from the Unity
-  log that explain it.
-- Your source is saved without `Library/`, `Temp/`, `Logs/`, `obj/`, builds
-  or `UserSettings/`, even when the project has no `.gitignore`.
-
-**A native build** (for example `My Game.exe` with `My Game_Data/` and
-`UnityPlayer.dll`) cannot be published, since OriginGame publishes Web builds
-only. The Wizard looks for the project it came from: the folder itself, its
-parents (up to four levels) and their subfolders. It builds that project
-instead. When there is none, it says what it found and how to export for the
-Web in that engine.
-
-## Origin Engine
-
-An Origin Engine game is published as `og build --publish` wrote it, with
-engine `origin-engine`, so Portal keeps what only that engine gets: the
-service worker (`sw.js`) and web manifest that make it installable. The
-Wizard publishes every file og listed in `og-build.json`, including the
-hidden `cooked/.cook.ogt` the engine loads first, and edits none of them:
-
-- A **project** (`project.ogt`) is built in a scratch copy with
-  `og build <copy> --publish --out <dir>` (never the template's `npm run
-  build`, which is a dev build), so og's `cooked/` never lands in your
-  folder. Without `og` the existing build in `publish.out` (default `dist/`)
-  is published with a warning, or the run stops before any model call with
-  how to install it.
-- Cross-origin isolation is `og-build.json`'s `crossOriginIsolation`; an older
-  build without `origingame.runtime.json` gets the declaration og would write.
-- A dev build (`og build` without `--publish`) is published with a warning.
-- Scores and saves are not wired into the build output; wire them in the
-  project's `src/` through `og.platform`, then publish the project.
-
-## What is sent to the model, and what is not
-
-Sent, through the OriginGame AI Gateway, to DeepSeek:
-
-- the list of file names and sizes in your build (and in your source, for projects that are built);
-- your entry HTML and up to about 120 KB of source text: `package.json`, the Vite config, `project.ogt`, `project.godot`, the Web preset of `export_presets.cfg` (lines mentioning passwords, keys or keystores removed), and your main scripts;
-- the deterministic findings (for example "`style.css` references `/assets/bg.png`").
-
-For the artwork, the image model receives only the text prompts DeepSeek wrote
-from the game's description. No screenshot or file of yours is sent to it.
-
-Never sent:
-
-- credential files: `.env*`, `*.pem`, `*.key`, `*.p12`, keystores, `id_*` SSH keys, `.npmrc`, `.netrc`, `credentials.*`, `secrets.*`, service account files. They are also never uploaded;
-- any file with a line that looks like a credential (cloud and API key formats, private key blocks, `api_key = "…"` style assignments). If such a file is part of your game, it is still published (removing it could break the game) and the run warns you, because a key in a public game is public;
-- the source uploaded to your private repository is not sent to any model beyond the digest above.
+- It reads files of the workspace only. Credential files (`.env*`, `*.pem`, `*.key`, `*.p12`, keystores, `id_*` SSH keys, `.npmrc`, `.netrc`, `credentials.*`, `secrets.*`, service account files) are never read and never uploaded. Any line that looks like a credential (cloud and API key formats, private key blocks, `api_key = "…"` assignments) is replaced before the model sees a file, a search result or a command's output.
+- Commands run in the workspace with your environment minus every variable whose name looks like a credential (`*TOKEN*`, `*SECRET*`, `*KEY*`, `OG_*` …). In Automatic they run without asking (installs and build scripts may use the network and run the project's own scripts); in Manual you confirm each one.
+- If a file the game needs has a credential-like line, it is still published (removing it could break the game) after a warning, because a key in a public game is public.
+- The image model receives only text prompts written from the game's listing.
+- The run is bounded by the session: 30 minutes and a per-run model budget, then it stops and reports what it tried.
 
 ## Your source in a private repository
 
@@ -282,29 +163,28 @@ npx origingame --yes --json
 stdout is a single JSON line:
 
 ```json
-{"ok":true,"action":"created","gameId":"…","slug":"…","version":1,"releaseId":"…","playUrl":"…","portalUrl":"…",
- "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","family":null,"stageSha256":"…","rulesVersion":"…","adaptations":["…"],
- "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":3,"imageCalls":5,"models":["…"]},
+{"ok":true,"action":"created","gameId":"…","slug":"…","version":1,"releaseId":"…","title":"…","playUrl":"…","portalUrl":"…",
+ "readiness":{"status":"ready"},"warnings":[],"engine":"threejs","stageSha256":"…","rulesVersion":"…",
+ "steps":["list .","run: npm ci","run: npm run build","publish dist as threejs"],"summary":"…",
+ "usage":{"sessionId":"pak_…","quota":1000000,"promptTokens":0,"completionTokens":0,"chatCalls":12,"imageCalls":2,"models":["…"]},
  "source":{"repositoryId":"…","checkpointId":"…"},
  "workspace":{"kind":"worktree","path":"…/.origingame/worktrees/…","branch":"origingame/publish","base":"…",
-  "commits":[{"sha":"…","message":"origingame: adapt for OriginGame"}],"review":"git diff HEAD...origingame/publish","merge":"git merge origingame/publish"},
- "integration":{"applied":true,"files":["game.js","og-player.js (new)"]}}
-{"ok":false,"error":{"code":"build_failed","message":"…"}}
+  "commits":[{"sha":"…","message":"origingame: publish to OriginGame"}],"review":"git diff HEAD...origingame/publish","merge":"git merge origingame/publish"},
+ "aigcc":null}
+{"ok":false,"error":{"code":"agent_stopped","message":"…"}}
 ```
 
-Error codes: `not_logged_in`, `session_refused`, `detect_failed`, `build_failed`,
-`adapt_failed`, `artwork_failed`, `upload_failed`, `source_failed`, `publish_failed`,
-`readiness_failed` (with `error.readiness`), `rules_unavailable`, `aigcc_refused`, `aborted`,
+Error codes: `not_logged_in`, `session_refused`, `agent_stopped` (the agent gave up,
+or the session's time or budget ran out, before anything was published),
+`publish_failed`, `upload_failed`, `rules_unavailable`, `aigcc_refused`, `aborted`,
 `invalid_arguments`. Exit code `0` on success, `130` when cancelled, `1` otherwise.
 `usage.quota` is the run's budget cap, not what it spent.
-`engine` is the catalog engine Portal received (`html`, `origin-engine`, `threejs`, `unity`);
-`family` is `{id, label}` for the engine or framework the files showed
-(`{"id":"construct3","label":"Construct 3"}`), or `null`.
+`engine` is the catalog engine Portal received (`html`, `origin-engine`, `threejs`, `unity`).
+`steps` is what the agent did, in order; `summary` its own account of what it changed and why.
 `source` is `{repositoryId, checkpointId, commit, createdRepository, files, bytes,
-committed, deleted, lfsObjects, withheld}`, or `null` with `--no-source`.
+committed, deleted, lfsObjects, withheld}`, or `null` with `--no-source` or when it
+was not saved (the publication never waits for or fails on it; a warning says why).
 `workspace` is the worktree (as above) or `{"kind":"copy","path":"…"}` outside Git.
-`integration` is `{applied: false, reason}` when it was turned off, impossible
-(no web source) or dropped after a failed readiness check.
 
 If the agent's machine is not signed in, the command prints a sign-in link and
 code on stderr and waits for you to approve it in the browser. In CI, sign in
@@ -366,13 +246,8 @@ node dist/cli.js deploy --dir fixtures/plain-html --host http://localhost:8080
 
 The end-to-end tests run the built CLI as a subprocess against a fake platform
 (`test/fake-platform.mjs`) that implements the Identity, AI Gateway and Portal
-contracts, on the fixture projects in `fixtures/` (plain pages, npm builds,
-Origin Engine projects and builds, Godot, Unity and other engines' exports,
-native builds), with a stand-in Unity Editor (`test/fake-unity.mjs`) and `og`
-(`test/fake-og.mjs`), and write
-`test-artifacts/e2e-report.json` plus the chosen artwork. Set
-`WIZARD_RULES_DIR=<platform>/packages/game-knowledge/production/wizard` to run
-them against the real rules and prompts.
+contracts, with a scripted model that answers the publishing loop with tool
+calls, on the fixture projects in `fixtures/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 

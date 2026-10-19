@@ -5,6 +5,14 @@ import type { WizardSession } from './session.js'
 
 export interface Usage { promptTokens: number; completionTokens: number; chatCalls: number; imageCalls: number; models: string[] }
 
+export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
+export interface AssistantMessage { role: 'assistant'; content: string; reasoning_content?: string; tool_calls?: ToolCall[] }
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | AssistantMessage
+  | { role: 'tool'; tool_call_id: string; content: string }
+export interface ToolSpec { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
+
 export function newUsage(): Usage {
   return { promptTokens: 0, completionTokens: 0, chatCalls: 0, imageCalls: 0, models: [] }
 }
@@ -130,6 +138,44 @@ export class ModelClient {
       messages.push({ role: 'user', content: `That answer does not match the schema: ${errors.slice(0, 10).join('; ')}. Answer again with only the corrected JSON object.` })
     }
     throw new WizardError(options.failure, `the model's ${options.task} answer did not match its contract twice`)
+  }
+
+  /**
+   * One turn of the publishing loop: the conversation so far and the tools,
+   * answered with the assistant message (text and/or tool calls). Errors the
+   * loop cannot continue past (budget used up, session expired, model not
+   * allowed) are thrown as WizardError `agent_stopped`.
+   */
+  async chat(model: string, messages: ChatMessage[], tools: ToolSpec[], maxTokens = 8192): Promise<AssistantMessage> {
+    this.usage.chatCalls++
+    this.record(model)
+    let response
+    try {
+      response = await this.post('/v1/chat/completions', { model, messages, tools, tool_choice: 'auto', stream: false, temperature: 0.2, max_tokens: maxTokens }, 300_000)
+    } catch (error) {
+      throw new WizardError('agent_stopped', `the model could not be reached: ${(error as Error).message}`)
+    }
+    if (!response.ok) {
+      const code = errorCode(response)
+      const why = response.status === 403 && /quota|budget/i.test(`${code ?? ''} ${response.text}`) ? 'this run used up its model budget'
+        : response.status === 403 ? `the model ${model} is not allowed for this session`
+          : response.status === 401 ? 'the Wizard session expired (30 minutes)' : describe(response)
+      throw new WizardError('agent_stopped', why)
+    }
+    const usage = response.json?.usage
+    if (usage) {
+      this.usage.promptTokens += Number(usage.prompt_tokens) || 0
+      this.usage.completionTokens += Number(usage.completion_tokens) || 0
+    }
+    const message = response.json?.choices?.[0]?.message
+    if (!message || typeof message !== 'object') throw new WizardError('agent_stopped', 'the model returned no message')
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls.filter((c: any) => typeof c?.function?.name === 'string') : []
+    return {
+      role: 'assistant',
+      content: typeof message.content === 'string' ? message.content : '',
+      ...(typeof message.reasoning_content === 'string' ? { reasoning_content: message.reasoning_content } : typeof message.reasoning === 'string' ? { reasoning_content: message.reasoning } : {}),
+      ...(calls.length ? { tool_calls: calls.map((c: any, i: number) => ({ id: typeof c.id === 'string' && c.id ? c.id : `call_${i}`, type: 'function' as const, function: { name: String(c.function.name), arguments: typeof c.function.arguments === 'string' ? c.function.arguments : JSON.stringify(c.function.arguments ?? {}) } })) } : {}),
+    }
   }
 
   /** One image; returns its bytes. Retries once at `fallbackSize` when the size is refused. */

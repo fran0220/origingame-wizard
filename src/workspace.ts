@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { UNITY_CACHE_DIRS } from './detect.js'
 import { WizardError } from './errors.js'
 import { isTextFile, readText } from './files.js'
 import { ensureHome, projectKey } from './home.js'
 import { findSecrets, isSecretFile } from './secrets.js'
+
+/** A Unity project's import cache and temporary folders: never carried, copied or committed. */
+export const UNITY_CACHE_DIRS = ['Library', 'Temp', 'Logs', 'obj', 'UserSettings', 'MemoryCaptures', 'Recordings']
 
 /** The branch every adaptation and integration of a Git project is committed to. */
 export const PUBLISH_BRANCH = 'origingame/publish'

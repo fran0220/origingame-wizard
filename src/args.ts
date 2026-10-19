@@ -8,7 +8,7 @@ export interface Options {
   dir: string
   yes: boolean
   json: boolean
-  /** Wire scores and saves into the code on the workspace (default; `--no-integrate` turns it off). */
+  /** The agent may wire scores and saves into the code on the workspace (default; `--no-integrate` turns it off). */
   integrate: boolean
   /** Commit the project source to the person's private repository (default; `--no-source` turns it off). */
   source: boolean
@@ -26,14 +26,15 @@ export interface Options {
 
 const COMMANDS = new Set<Command>(['deploy', 'login', 'logout', 'whoami', 'help', 'version'])
 
-export const USAGE = `Run \`npx origingame\` in your game folder and answer the questions. Automatic
-publishes with the recommended settings; Manual asks about each one.
+export const USAGE = `Run \`npx origingame\` in your game folder. An AI agent publishes it to OriginGame:
+it builds the game, adapts it to the platform, publishes it and fixes whatever the
+build or the platform reports until the game plays. Automatic decides by itself;
+Manual asks you to confirm every command and each setting.
 
-What a run does: finds the game, signs you in, adapts it to OriginGame and wires
-leaderboards and cloud saves on a branch origingame/publish in a separate Git
-worktree (or a copy when the folder is not in Git), never in your folder; saves
-the source to your private repository; writes the listing, cover and poster;
-publishes; and tells you how to review and merge the branch.
+It works on a branch origingame/publish in a separate Git worktree (or a copy when
+the folder is not in Git), never in your folder; saves the source to your private
+repository; writes the listing, cover and poster; and tells you how to review and
+merge the branch.
 
 Commands:
   npx origingame [deploy]     publish the game in this folder
@@ -52,7 +53,7 @@ Options for scripts and agents (they take the Automatic choices without asking):
   --no-aigcc                 do not submit to AIGCC (a guided run asks when your team is in the finals)
   --title <title>            game title
   --unlisted                 keep the game out of the public catalog (anyone with the link can play)
-  --prebuilt <dir>           skip the build and publish this folder
+  --prebuilt <dir>           a folder that is already built: the agent publishes it as it is unless it does not work
   --host <origin>            platform origin (default: https://origingame.ai, or OG_HOST)
   --no-telemetry             disable anonymous usage events
   --credentials-file <path>  sandbox mode: run with a session handed over in this file (deleted on read)
