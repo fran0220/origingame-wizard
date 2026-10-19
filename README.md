@@ -76,7 +76,7 @@ Wizard rules, so new engines are added there without a new Wizard release.
 8. **Adapt** (always): root-absolute paths made relative, cross-origin isolation declared for threaded WebAssembly (`origingame.runtime.json`), a Godot export's service worker turned off, a stale OriginGame entry config removed, and small exact code edits. Automatic takes the required and recommended items; Manual lets you leave out the optional ones. Where the published files are your own files (HTML games, exports in the tree) the changes are committed as `origingame: adapt for OriginGame`; for built projects they apply to the build output.
 9. **Integrate** (by default; `--no-integrate` or Manual's No turns it off): DeepSeek wires leaderboards and cloud saves to the Player protocol in the workspace's source, shows the diff and commits it as `origingame: wire leaderboards and cloud saves`. If the integrated build does not become ready in the Player, the Wizard drops that commit, publishes the adaptation-only build instead and reports why; the publication never fails because of the integration.
 10. **Artwork**: DeepSeek writes prompts and Qwen Image Turbo draws from text only (no screenshots), each image cropped and scaled locally to 1280×720 (cover, 16:9) and 1080×1440 (poster, 3:4). In Manual, 3 cover and 2 poster candidates to pick from in the terminal, with a local preview page; Automatic and `--yes` draw one of each.
-11. **Publish**: the source goes to your private repository (below), the build is uploaded content-addressed (an update uploads only changed files), the game is created or updated, and the Wizard waits for the readiness check, then prints the play link and how to review (`git diff HEAD...origingame/publish`) and keep (`git merge origingame/publish`) the branch.
+11. **Publish**: the source goes to your private repository (below), the build is uploaded content-addressed (an update uploads only changed files; files are streamed from disk, eight at a time by default, and an upload Portal ends partway resumes with what is still missing), the game is created or updated, and the Wizard waits for the readiness check, then prints the play link and how to review (`git diff HEAD...origingame/publish`) and keep (`git merge origingame/publish`) the branch.
 
 The next run in the same directory updates the same game: its id is remembered in
 `~/.origingame/projects.json`, the current release revision is read, and the
@@ -98,13 +98,14 @@ Run `npx origingame` in that folder, in a folder above it, or pass
 - A build with **WebGL threads** (shared memory, found by reading the
   `.wasm` itself, compressed or not) is also declared cross-origin isolated.
   An existing `origingame.runtime.json` is merged, never replaced.
-- OriginGame accepts **50 MiB per file and 200 MiB in total**. An
-  uncompressed build over those limits is Brotli-compressed by the Wizard for
-  that release (the loader references in `index.html` are updated and the
-  build is declared precompressed; your folder is not changed). If it does not
-  fit even compressed, the Wizard says which files are too large and what to
-  change in Unity (Brotli, code stripping, texture compression, moving content
-  to Addressables).
+- OriginGame accepts **512 MiB per file, 1 GiB and 20,000 files in total**
+  (the platform's rules name the current limits, and the Wizard's messages
+  quote them). An uncompressed build over those limits is Brotli-compressed
+  by the Wizard for that release (the loader references in `index.html` are
+  updated and the build is declared precompressed; your folder is not
+  changed). If it does not fit even compressed, the Wizard says which files
+  are too large and what to change in Unity (Brotli, code stripping, texture
+  compression, moving content to Addressables).
 - The page template may get small edits so the canvas fills the Player's
   frame; the Unity PWA template's service worker is turned off, because the
   Player owns caching. `Build/` files are never edited.
@@ -182,7 +183,9 @@ yes); Automatic and `--yes` save it; `--no-source` turns it off.
   for the directory, or the one already linked to the game you update.
 - Limits: 5,000 files, 1 GiB in total, 512 MiB per file, and your account's
   2 GiB storage for large files. Over a limit, the run stops before any model
-  call; if the upload fails, nothing is published.
+  call; if the upload fails, nothing is published. Large files are streamed
+  to Git LFS four at a time; a store failure or an expired upload URL is
+  retried with a new URL.
 - It uses your own sign-in, not the platform-funded session, and never writes
   to your project directory.
 
@@ -190,6 +193,9 @@ The prompts the Wizard uses are public and versioned: they are downloaded at
 startup from `https://origingame.ai/wizard/v1/rules.json` (the version is shown
 on screen), and their single source is the platform repository's
 `packages/game-knowledge/production/wizard/`. The Wizard never ships a copy.
+The same document names Portal's upload limits and how many files to upload
+at a time (`limits`); when it does not, the Wizard uses its own defaults
+(512 MiB per file, 1 GiB and 20,000 files in total, 8 at a time).
 
 ## Who pays, and what stops abuse
 
