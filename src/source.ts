@@ -4,8 +4,8 @@ import path from 'node:path'
 import { SOURCE_LIMITS, VERSION } from './constants.js'
 import { WizardError } from './errors.js'
 import { UNITY_IGNORE, walkTracked } from './gitignore.js'
-import { describe, errorCode, request, type HttpResponse } from './http.js'
-import { sha256 } from './files.js'
+import { describe, errorCode, NetworkError, request, retryAfterMs, sendFile, sleep, type HttpResponse } from './http.js'
+import { hashFile, sha256 } from './files.js'
 import { findSecrets, isSecretFile } from './secrets.js'
 import type { Ui } from './ui.js'
 
@@ -106,12 +106,23 @@ const key = () => `wizard-${randomBytes(16).toString('hex')}`
 class Agent {
   constructor(readonly origin: string, private readonly token: string) {}
 
-  call(method: string, route: string, options: { json?: unknown; idempotency?: string; accept?: string; timeoutMs?: number } = {}): Promise<HttpResponse> {
+  /** One request; with `retries`, network failures and transient answers (429, 5xx) are tried again that many times. */
+  async call(method: string, route: string, options: { json?: unknown; idempotency?: string; accept?: string; timeoutMs?: number; retries?: number } = {}): Promise<HttpResponse> {
     const headers: Record<string, string> = { authorization: `Bearer ${this.token}` }
     if (options.idempotency) headers['idempotency-key'] = options.idempotency
     if (options.accept) headers.accept = options.accept
-    return request(`${this.origin}${route}`, { method, headers, ...(options.json === undefined ? {} : { json: options.json }), timeoutMs: options.timeoutMs ?? 60_000 })
-      .catch(error => { throw new WizardError('source_failed', `could not reach Agent Service: ${(error as Error).message}`) })
+    const retries = options.retries ?? 0
+    for (let attempt = 0; ; attempt++) {
+      let response: HttpResponse
+      try {
+        response = await request(`${this.origin}${route}`, { method, headers, ...(options.json === undefined ? {} : { json: options.json }), timeoutMs: options.timeoutMs ?? 60_000 })
+      } catch (error) {
+        if (attempt < retries) { await sleep(backoff(attempt)); continue }
+        throw new WizardError('source_failed', `could not reach Agent Service: ${(error as Error).message}`)
+      }
+      if (attempt < retries && TRANSIENT.has(response.status)) { await sleep(backoff(attempt, response)); continue }
+      return response
+    }
   }
 
   async ok(method: string, route: string, what: string, options: Parameters<Agent['call']>[2] = {}): Promise<any> {
@@ -151,30 +162,126 @@ function attributePattern(file: string): string {
   return `/${file.replace(/[^A-Za-z0-9._/-]/g, '?')} filter=lfs diff=lfs merge=lfs -text`
 }
 
-async function uploadLfs(agent: Agent, repositoryId: string, objects: Array<{ oid: string; size: number; file: string }>, ui: Ui): Promise<void> {
-  const lfs = 'application/vnd.git-lfs+json'
+const LFS = 'application/vnd.git-lfs+json'
+/** Answers worth trying again: throttling, a busy server, a gateway in between. */
+const TRANSIENT = new Set([408, 429, 500, 502, 503, 504])
+/** Large files sent at a time. */
+const LFS_CONCURRENCY = 4
+/** A presigned URL with less than this left is requested again before it is used. */
+const LFS_REFRESH_MS = 60_000
+const LFS_ATTEMPTS = 6
+
+function backoff(attempt: number, response?: HttpResponse): number {
+  const asked = response ? retryAfterMs(response) : null
+  if (asked !== null) return Math.min(60_000, Math.max(250, asked))
+  return Math.min(30_000, 1000 * 2 ** attempt)
+}
+
+interface LfsObject { oid: string; size: number; file: string }
+interface LfsAction { href: string; header: Record<string, string>; expiresAt: number }
+interface LfsActions { upload?: LfsAction; verify?: LfsAction }
+
+function lfsAction(raw: any, now: number): LfsAction | undefined {
+  if (!raw || typeof raw.href !== 'string') return undefined
+  const expiresAt = typeof raw.expires_in === 'number' ? now + raw.expires_in * 1000
+    : typeof raw.expires_at === 'string' && Number.isFinite(Date.parse(raw.expires_at)) ? Date.parse(raw.expires_at) : Infinity
+  return { href: raw.href, header: raw.header && typeof raw.header === 'object' ? raw.header as Record<string, string> : {}, expiresAt }
+}
+
+/** One LFS batch request: what to do for each object (no upload action: the server already has it). */
+async function lfsBatch(agent: Agent, repositoryId: string, objects: LfsObject[]): Promise<Map<string, LfsActions>> {
+  const answer = await agent.ok('POST', `/git/${encodeURIComponent(repositoryId)}.git/info/lfs/objects/batch`, 'preparing large files', {
+    json: { operation: 'upload', transfers: ['basic'], hash_algo: 'sha256', objects: objects.map(o => ({ oid: o.oid, size: o.size })) }, accept: LFS, retries: 4,
+  })
+  const now = Date.now()
+  const out = new Map<string, LfsActions>()
+  for (const item of answer?.objects ?? []) {
+    const object = objects.find(o => o.oid === item?.oid)
+    if (!object) continue
+    if (item.error) throw new WizardError('source_failed', `${path.basename(object.file)} could not be stored: ${item.error.message ?? item.error.code}`)
+    out.set(object.oid, { upload: lfsAction(item.actions?.upload, now), verify: lfsAction(item.actions?.verify, now) })
+  }
+  return out
+}
+
+/**
+ * One large file: streamed to its presigned URL (requested again when it is
+ * about to expire, has expired, or the store failed), then verified. The
+ * upload fails only when no byte moves for two minutes, never on its length.
+ */
+async function sendLfsObject(agent: Agent, repositoryId: string, object: LfsObject, first: LfsActions, signal: AbortSignal): Promise<void> {
+  const name = path.basename(object.file)
+  let actions: LfsActions = first
+  let refresh = false
+  let last = ''
+  let stored = false
+  for (let attempt = 0; attempt < LFS_ATTEMPTS && !stored; attempt++) {
+    if (signal.aborted) throw signal.reason
+    if (refresh || (actions.upload && actions.upload.expiresAt - Date.now() < LFS_REFRESH_MS)) {
+      actions = (await lfsBatch(agent, repositoryId, [object])).get(object.oid) ?? {}
+      refresh = false
+    }
+    const upload = actions.upload
+    if (!upload) { stored = true; break }
+    try {
+      const put = await sendFile(upload.href, object.file, {
+        method: 'PUT', size: object.size, headers: upload.header, signal,
+        idleMs: 120_000, answerMs: 120_000 + Math.ceil(object.size / 1048576) * 250,
+      })
+      if (put.ok) { stored = true; break }
+      last = `HTTP ${put.status}`
+      // An expired or refused signature: ask for a new URL. A store hiccup: wait and try again.
+      if (put.status === 401 || put.status === 403) { refresh = true; continue }
+      if (!TRANSIENT.has(put.status)) throw new WizardError('source_failed', `uploading ${name} failed: ${describe(put)}`)
+      refresh = true
+      await sleep(backoff(attempt, put))
+    } catch (error) {
+      if (signal.aborted) throw signal.reason
+      if (error instanceof WizardError) throw error
+      if (!(error instanceof NetworkError)) throw new WizardError('source_failed', `uploading ${name} failed: ${(error as Error).message}`)
+      last = error.message
+      refresh = true
+      await sleep(backoff(attempt))
+    }
+  }
+  if (!stored) throw new WizardError('source_failed', `uploading ${name} failed after ${LFS_ATTEMPTS} attempts: ${last}`)
+  for (let attempt = 0; actions.verify; attempt++) {
+    if (actions.verify.expiresAt - Date.now() < LFS_REFRESH_MS) actions = (await lfsBatch(agent, repositoryId, [object])).get(object.oid) ?? {}
+    const verify = actions.verify
+    if (!verify) break
+    let checked: HttpResponse | null = null
+    try {
+      checked = await request(verify.href, { headers: { ...verify.header, accept: LFS, 'content-type': LFS }, body: JSON.stringify({ oid: object.oid, size: object.size }), method: 'POST' })
+    } catch (error) {
+      if (attempt >= LFS_ATTEMPTS - 1) throw new WizardError('source_failed', `verifying ${name} failed: ${(error as Error).message}`)
+      await sleep(backoff(attempt))
+      continue
+    }
+    if (checked.ok) break
+    if (!TRANSIENT.has(checked.status) || attempt >= LFS_ATTEMPTS - 1) throw new WizardError('source_failed', `verifying ${name} failed: ${describe(checked)}`)
+    await sleep(backoff(attempt, checked))
+  }
+}
+
+/** Stores the large files with Git LFS, `LFS_CONCURRENCY` at a time, batch by batch (at most 100 objects each). */
+async function uploadLfs(agent: Agent, repositoryId: string, objects: LfsObject[], ui: Ui): Promise<void> {
   for (let at = 0; at < objects.length; at += 100) {
     const batch = objects.slice(at, at + 100)
-    const answer = await agent.ok('POST', `/git/${encodeURIComponent(repositoryId)}.git/info/lfs/objects/batch`, 'preparing large files', {
-      json: { operation: 'upload', transfers: ['basic'], hash_algo: 'sha256', objects: batch.map(o => ({ oid: o.oid, size: o.size })) }, accept: lfs,
-    })
-    for (const item of answer?.objects ?? []) {
-      const object = batch.find(o => o.oid === item.oid)
-      if (!object) continue
-      if (item.error) throw new WizardError('source_failed', `${object.file} could not be stored: ${item.error.message ?? item.error.code}`)
-      const upload = item.actions?.upload
-      if (!upload) continue
-      const bytes = fs.readFileSync(object.file)
-      const put = await request(upload.href, { method: 'PUT', headers: { ...(upload.header ?? {}) }, body: bytes, timeoutMs: 60_000 + Math.ceil(bytes.length / 1048576) * 2_000 })
-        .catch(error => { throw new WizardError('source_failed', `uploading ${path.basename(object.file)} failed: ${(error as Error).message}`) })
-      if (!put.ok) throw new WizardError('source_failed', `uploading ${path.basename(object.file)} failed: HTTP ${put.status}`)
-      const verify = item.actions?.verify
-      if (verify) {
-        const checked = await request(verify.href, { headers: { ...(verify.header ?? {}), accept: lfs, 'content-type': lfs }, body: JSON.stringify({ oid: object.oid, size: object.size }), method: 'POST' })
-          .catch(error => { throw new WizardError('source_failed', `verifying ${path.basename(object.file)} failed: ${(error as Error).message}`) })
-        if (!checked.ok) throw new WizardError('source_failed', `verifying ${path.basename(object.file)} failed: ${describe(checked)}`)
+    const answers = await lfsBatch(agent, repositoryId, batch)
+    const queue = batch.filter(o => answers.get(o.oid)?.upload)
+    const stop = new AbortController()
+    let failure: unknown = null
+    const worker = async () => {
+      for (let next = queue.shift(); next && !stop.signal.aborted; next = queue.shift()) {
+        await sendLfsObject(agent, repositoryId, next, answers.get(next.oid)!, stop.signal)
       }
     }
+    await Promise.all(Array.from({ length: Math.min(LFS_CONCURRENCY, queue.length) }, () => worker().catch(error => {
+      if (stop.signal.aborted) return
+      failure = error
+      stop.abort(error)
+    })))
+    if (failure) throw failure
     ui.info(`Stored ${Math.min(at + batch.length, objects.length)}/${objects.length} large files with Git LFS`)
   }
 }
@@ -230,9 +337,9 @@ export async function uploadSource(options: {
     const absolute = path.join(plan.root, file.path)
     if (file.path === ATTRIBUTES) { attributes = fs.readFileSync(absolute); continue }
     if (file.size > SOURCE_LIMITS.lfsThreshold) {
-      const oid = sha256(fs.readFileSync(absolute))
-      lfsObjects.push({ oid, size: file.size, file: absolute, path: file.path })
-      const content = Buffer.from(pointer(oid, file.size))
+      const { sha256: oid, size } = await hashFile(absolute)
+      lfsObjects.push({ oid, size, file: absolute, path: file.path })
+      const content = Buffer.from(pointer(oid, size))
       blobs.push({ path: file.path, content, sha: sha256(content) })
     } else {
       const content = fs.readFileSync(absolute)

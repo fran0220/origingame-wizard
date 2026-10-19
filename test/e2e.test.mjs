@@ -864,6 +864,54 @@ describe('--with-source', () => {
     assert.equal(run3.requests.filter(q => q.path.endsWith('/commits')).length, 0, 'nothing changed, nothing committed')
   })
 
+  test('large files go to Git LFS several at a time, streamed, with presigned URLs renewed before they expire and store failures retried', async () => {
+    const lfsPut = platform.state.agent.lfsPut
+    const reset = () => Object.assign(lfsPut, { expiresIn: 900, delayMs: 0, maxInFlight: 0, fail: 0, refuseFirst: false, refused: new Set(), expired: 0, failed: 0, stored: 0 })
+    /** plain-html with `count` large, never-seen files. */
+    const project = count => {
+      const dir = copyFixture('plain-html')
+      fs.mkdirSync(path.join(dir, 'audio'), { recursive: true })
+      return { dir, files: Array.from({ length: count }, (_, i) => { const bytes = randomBytes(300 * 1024 + i); fs.writeFileSync(path.join(dir, 'audio', `track-${i}.ogg`), bytes); return bytes }) }
+    }
+    const run = async ({ dir, files }) => {
+      platform.state.script = scriptFor('plain-html')
+      const m = mark()
+      const cli = await runCli(['deploy', '--dir', dir, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), env: AGENT() })
+      const r = since(m)
+      assert.equal(cli.code, 0, cli.stderr)
+      assert.equal(cli.result.source.lfsObjects, files.length)
+      for (const bytes of files) {
+        const oid = sha256(bytes)
+        assert.equal(platform.state.agent.lfs.get(oid)?.verified, true, `${oid} stored and verified`)
+        assert.equal(sha256(platform.state.agent.objects.get(oid)), oid)
+      }
+      for (const put of r.requests.filter(q => q.method === 'PUT' && q.path.startsWith('/objects/lfs/'))) assert.equal(put.contentLength, String(put.bytes))
+      return r
+    }
+    try {
+      // URLs valid for 1 s and a store that takes 600 ms per object: twelve objects four at a time only fit if each URL is renewed before use.
+      reset()
+      Object.assign(lfsPut, { expiresIn: 1, delayMs: 600 })
+      let r = await run(project(12))
+      assert.equal(lfsPut.maxInFlight, 4, 'four objects at a time')
+      assert.equal(lfsPut.expired, 0, 'no URL was used after it expired')
+      assert.equal(lfsPut.stored, 12)
+      assert.ok(r.requests.filter(q => q.path.endsWith('/info/lfs/objects/batch')).length > 1, 'URLs were requested again')
+      report.scenarios.lfsRenewal = { maxInFlight: lfsPut.maxInFlight, batches: r.requests.filter(q => q.path.endsWith('/info/lfs/objects/batch')).length }
+
+      // A URL refused as expired despite its expires_in, and two store failures (500): each object still lands once.
+      reset()
+      Object.assign(lfsPut, { refuseFirst: true, fail: 2 })
+      r = await run(project(5))
+      assert.equal(lfsPut.refused.size, 5, 'every first PUT was refused')
+      assert.equal(lfsPut.failed, 2, 'two store failures were answered')
+      assert.equal(lfsPut.stored, 5)
+      report.scenarios.lfsRetry = { refused: lfsPut.refused.size, failed: lfsPut.failed, puts: r.requests.filter(q => q.path.startsWith('/objects/lfs/')).length }
+    } finally {
+      reset()
+    }
+  })
+
   test('a source over the limits fails with source_failed before any model call or publication', async () => {
     platform.state.script = scriptFor('plain-html')
     const project = copyFixture('plain-html')

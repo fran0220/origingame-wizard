@@ -98,7 +98,11 @@ export async function startPlatform({ rulesDir }) {
     upload: { delayMs: 0, inFlight: 0, maxInFlight: 0, throttle: 0, throttled: [], expireAfter: null, dropAfter: null, puts: [], stored: [] },
     // AIGCC finals (aigcc/server/src/finals.ts): null = the account's team is not in the finals.
     aigcc: { team: null, open: true, refuseBind: false, submissions: [] },
-    agent: { repos: new Map(), commits: new Map(), checkpoints: new Map(), lfs: new Map(), objects: new Map(), receipts: new Map(), bodies: [], raceNextCommit: false },
+    agent: {
+      repos: new Map(), commits: new Map(), checkpoints: new Map(), lfs: new Map(), objects: new Map(), receipts: new Map(), bodies: [], raceNextCommit: false,
+      // The object store behind LFS: presigned URLs expire `expiresIn` seconds after the batch; failures to inject.
+      lfsPut: { expiresIn: 900, delayMs: 0, inFlight: 0, maxInFlight: 0, fail: 0, refuseFirst: false, refused: new Set(), expired: 0, failed: 0, stored: 0 },
+    },
   }
   let imageSeq = 0
   const files = new Map()
@@ -310,8 +314,8 @@ export async function startPlatform({ rulesDir }) {
         if (known.verified) return { oid: o.oid, size: o.size, authenticated: true }
         return {
           oid: o.oid, size: o.size, authenticated: true, actions: {
-            upload: { href: `${state.origin}/objects/lfs/${o.oid}`, header: { 'x-amz-checksum-sha256': Buffer.from(o.oid, 'hex').toString('base64') }, expires_in: 900 },
-            verify: { href: `${state.origin}/git/${repo.id}.git/info/lfs/objects/verify`, header: { Authorization: req.headers.authorization }, expires_in: 900 },
+            upload: { href: `${state.origin}/objects/lfs/${o.oid}?exp=${Date.now() + state.agent.lfsPut.expiresIn * 1000}`, header: { 'x-amz-checksum-sha256': Buffer.from(o.oid, 'hex').toString('base64') }, expires_in: state.agent.lfsPut.expiresIn },
+            verify: { href: `${state.origin}/git/${repo.id}.git/info/lfs/objects/verify`, header: { Authorization: req.headers.authorization }, expires_in: state.agent.lfsPut.expiresIn },
           },
         }
       })
@@ -330,6 +334,7 @@ export async function startPlatform({ rulesDir }) {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://fake')
     if (req.method === 'PUT' && /^\/api\/deploy\/source-uploads\/[^/]+\/files$/.test(url.pathname)) track(state.upload, res)
+    if (req.method === 'PUT' && url.pathname.startsWith('/objects/lfs/')) track(state.agent.lfsPut, res)
     const raw = await body(req)
     const record = { method: req.method, host: req.headers.host ?? null, path: url.pathname, query: url.search, authorization: req.headers.authorization ?? null, repository: req.headers['x-origin-repository'] ?? null, contentType: req.headers['content-type'] ?? null, contentLength: req.headers['content-length'] ?? null, bytes: raw.length, at: Date.now() }
     state.requests.push(record)
@@ -423,9 +428,17 @@ export async function startPlatform({ rulesDir }) {
     // The object store behind LFS's presigned PUT URLs (checksum-bound).
     const lfsPut = /^\/objects\/lfs\/([a-f0-9]{64})$/.exec(url.pathname)
     if (lfsPut && req.method === 'PUT') {
+      const knobs = state.agent.lfsPut
+      if (knobs.delayMs) await wait(knobs.delayMs)
+      // A presigned URL is checked when it is used, as S3 does: past its expiry it is refused.
+      if (Number(url.searchParams.get('exp')) < Date.now()) { knobs.expired++; res.writeHead(403, { 'content-type': 'application/xml' }).end('<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>'); return }
+      if (knobs.refuseFirst && !knobs.refused.has(lfsPut[1])) { knobs.refused.add(lfsPut[1]); res.writeHead(403, { 'content-type': 'application/xml' }).end('<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>'); return }
+      if (knobs.fail > 0) { knobs.fail--; knobs.failed++; res.writeHead(500, { 'content-type': 'application/xml' }).end('<Error><Code>InternalError</Code></Error>'); return }
+      if (req.headers['content-length'] === undefined || Number(req.headers['content-length']) !== raw.length) return json(res, 411, { error: 'MissingContentLength' })
       const expected = state.agent.lfs.get(lfsPut[1])
       if (!expected || raw.length !== expected.size || Buffer.from(lfsPut[1], 'hex').toString('base64') !== req.headers['x-amz-checksum-sha256'] || sha256(raw) !== lfsPut[1]) return json(res, 400, { error: 'BadDigest' })
       state.agent.objects.set(lfsPut[1], raw)
+      knobs.stored++
       res.writeHead(200).end()
       return
     }
