@@ -28,5 +28,9 @@
     {"id": "pixi", "label": "PixiJS", "engine": "html", "markers": ["package.json:\"pixi.js\"", "pixi.min.js", "pixi.js", "pixi.mjs", "*.html:/pixi.js@", "*.html:pixi.min.js"]},
     {"id": "babylon", "label": "Babylon.js", "engine": "html", "markers": ["package.json:\"@babylonjs/core\"", "package.json:\"babylonjs\"", "babylon.js", "babylon.max.js", "*.html:cdn.babylonjs.com", "*.html:babylon.js"]}
   ],
-  "genres": ["arcade", "action", "puzzle", "shooter", "platformer", "racing", "strategy", "casual", "education", "cards", "other"]
+  "genres": ["arcade", "action", "puzzle", "shooter", "platformer", "racing", "strategy", "casual", "education", "cards", "other"],
+  "limits": {
+    "portal": { "maxFiles": 20000, "maxFileBytes": 536870912, "maxTotalBytes": 1073741824, "maxImageBytes": 5242880 },
+    "upload": { "concurrency": 8 }
+  }
 }

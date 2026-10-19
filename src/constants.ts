@@ -22,13 +22,49 @@ export const DEVICE_CLIENT = 'wizard'
 export const PORTAL_ENGINES = ['html', 'threejs', 'godot', 'unity'] as const
 export type Engine = (typeof PORTAL_ENGINES)[number]
 
-/** Portal source-upload limits (server/src/storage/source-uploads.ts). */
-export const PORTAL_LIMITS = {
-  maxFiles: 10_000,
-  maxFileBytes: 50 * 1024 * 1024,
-  maxTotalBytes: 200 * 1024 * 1024,
-  maxImageBytes: 5 * 1024 * 1024,
+/**
+ * Portal's source-upload limits (server/src/storage/source-uploads.ts) and how
+ * the Wizard uploads to it. The platform serves the current values in the
+ * rules document (`limits`, read by `parseLimits`); these defaults apply when
+ * it does not, and are Portal's own since 0.5.0.
+ */
+export interface Limits {
+  portal: { maxFiles: number; maxFileBytes: number; maxTotalBytes: number; maxImageBytes: number }
+  upload: { concurrency: number }
+}
+
+export const DEFAULT_LIMITS: Limits = {
+  portal: {
+    maxFiles: 20_000,
+    maxFileBytes: 512 * 1024 * 1024,
+    maxTotalBytes: 1024 * 1024 * 1024,
+    maxImageBytes: 5 * 1024 * 1024,
+  },
+  upload: { concurrency: 8 },
+}
+
+/** What the rules may set `limits` to; a value outside is clamped into the range. */
+export const LIMIT_BOUNDS = {
+  portal: {
+    maxFiles: [1, 1_000_000],
+    maxFileBytes: [1024 * 1024, 16 * 1024 * 1024 * 1024],
+    maxTotalBytes: [1024 * 1024, 64 * 1024 * 1024 * 1024],
+    maxImageBytes: [256 * 1024, 64 * 1024 * 1024],
+  },
+  upload: { concurrency: [1, 32] },
 } as const
+
+/** A byte count as people read limits: `512 MiB`, `1 GiB`, `1.5 GiB`, `300 KiB`. */
+export function formatBytes(bytes: number): string {
+  const units: Array<[number, string]> = [[1024 ** 3, 'GiB'], [1024 ** 2, 'MiB'], [1024, 'KiB']]
+  for (const [size, unit] of units) {
+    if (bytes >= size) {
+      const value = bytes / size
+      return `${Number.isInteger(value) ? value : Number(value.toFixed(1))} ${unit}`
+    }
+  }
+  return `${bytes} bytes`
+}
 
 /**
  * Source upload limits. Agent Service takes at most 64 files and 512 KiB of

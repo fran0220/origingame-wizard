@@ -105,6 +105,15 @@ function scriptFor(name) {
   }
 }
 
+/** Runs `fn` while the served rules carry `patch` (top-level keys; undefined leaves a key out); Portal enforces the served limits. */
+async function withRules(patch, fn) {
+  platform.state.rulesPatch = patch
+  try { return await fn() } finally { platform.state.rulesPatch = null }
+}
+const MiB = 1024 * 1024
+/** The served limits with some values replaced, as the platform would serve them. */
+const limits = (portal = {}, upload = {}) => ({ limits: { portal: { maxFiles: 20000, maxFileBytes: 512 * MiB, maxTotalBytes: 1024 * MiB, maxImageBytes: 5 * MiB, ...portal }, upload: { concurrency: 8, ...upload } } })
+
 /** Marks where this run's requests begin, so assertions see only this run. */
 function mark() {
   const s = platform.state
@@ -430,19 +439,61 @@ describe('failures', () => {
     }
   })
 
-  test('a build Portal would refuse fails with upload_failed before any model call', async () => {
+  test('a build over the limits the platform serves fails with upload_failed naming that limit, before any model call', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const home = signedInHome(platform.origin, DEVICE_TOKEN)
+    const refused = async (patch, setup) => {
+      const project = copyFixture('plain-html')
+      setup(project)
+      const m = mark()
+      const cli = await withRules(patch, () => runCli(['deploy', '--dir', project, '--json', '--no-source', '--host', platform.origin], { home }))
+      const run = since(m)
+      assert.equal(cli.code, 1, cli.stderr)
+      assert.equal(cli.result.error.code, 'upload_failed')
+      assert.equal(run.chat.length, 0, 'no model spend')
+      assert.equal(run.requests.filter(q => q.path.startsWith('/api/deploy/source-uploads')).length, 0, 'nothing offered to Portal')
+      assert.equal(run.sessions[0].revoked, true)
+      return cli.result.error.message
+    }
+    // Per file: a 3 MiB file against a served 2 MiB limit.
+    let message = await refused(limits({ maxFileBytes: 2 * MiB }), p => fs.writeFileSync(path.join(p, 'assets', 'huge.bin'), Buffer.alloc(3 * MiB)))
+    assert.match(message, /^assets\/huge\.bin is 3\.0 MiB; OriginGame accepts files up to 2 MiB$/)
+    report.scenarios.overLimit = { message }
+    // In total: two 2 MiB files against a served 3 MiB total.
+    message = await refused(limits({ maxTotalBytes: 3 * MiB }), p => { for (const n of ['a', 'b']) fs.writeFileSync(path.join(p, 'assets', `${n}.bin`), Buffer.alloc(2 * MiB)) })
+    assert.match(message, /^the build is 4\.\d MiB; OriginGame accepts at most 3 MiB in total$/)
+    // File count: a served limit of 5 files.
+    message = await refused(limits({ maxFiles: 5 }), () => {})
+    assert.match(message, /^the build has \d+ files; OriginGame accepts at most 5$/)
+  })
+
+  test('without limits in the rules (an older platform) the defaults are Portal\'s: a 60 MiB file is published byte for byte', async () => {
     platform.state.script = scriptFor('plain-html')
     const project = copyFixture('plain-html')
-    fs.writeFileSync(path.join(project, 'assets', 'huge.bin'), Buffer.alloc(51 * 1024 * 1024))
+    const big = Buffer.concat([randomBytes(1 * MiB), Buffer.alloc(59 * MiB, 7)])
+    fs.writeFileSync(path.join(project, 'assets', 'movie.bin'), big)
     const m = mark()
-    const cli = await runCli(['deploy', '--dir', project, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const cli = await withRules({ limits: undefined }, () => runCli(['deploy', '--dir', project, '--yes', '--json', '--no-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) }))
     const run = since(m)
-    report.scenarios.overLimit = { exitCode: cli.code, result: cli.result, chatCalls: run.chat.length }
-    assert.equal(cli.code, 1)
-    assert.equal(cli.result.error.code, 'upload_failed')
-    assert.match(cli.result.error.message, /assets\/huge\.bin/)
-    assert.equal(run.chat.length, 0, 'no model spend')
-    assert.equal(run.sessions[0].revoked, true)
+    assert.equal(cli.code, 0, cli.stderr)
+    const put = run.requests.find(q => q.method === 'PUT' && q.query.includes(encodeURIComponent('assets/movie.bin')))
+    assert.equal(put.contentLength, String(big.length), 'sent with its exact Content-Length')
+    assert.equal(sha256(run.deploys.at(-1).files['assets/movie.bin']), sha256(big))
+  })
+
+  test('limits out of range are clamped and malformed ones ignored: the run still publishes', async () => {
+    platform.state.script = scriptFor('plain-html')
+    const m = mark()
+    const cli = await withRules({ limits: { portal: { maxFiles: -3, maxFileBytes: 'big', maxTotalBytes: null }, upload: { concurrency: 10_000 } } }, () =>
+      runCli(['deploy', '--dir', copyFixture('plain-html'), '--yes', '--json', '--no-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) }))
+    const run = since(m)
+    // maxFiles -3 is clamped to 1, which a plain HTML build with several files exceeds: the clamp, not a crash, decides.
+    assert.equal(cli.code, 1, cli.stderr)
+    assert.match(cli.result.error.message, /OriginGame accepts at most 1$/)
+    assert.equal(run.chat.length, 0)
+    const ok = await withRules({ limits: 'unlimited' }, () =>
+      runCli(['deploy', '--dir', copyFixture('plain-html'), '--yes', '--json', '--no-source', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) }))
+    assert.equal(ok.code, 0, ok.stderr)
   })
 
   test('not signed in under CI: not_logged_in, exit 1', async () => {
@@ -458,6 +509,112 @@ describe('failures', () => {
     const cli = await runCli(['deploy', '--dir', empty, '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
     assert.equal(cli.code, 1)
     assert.equal(cli.result.error.code, 'detect_failed')
+  })
+})
+
+describe('uploads to Portal', () => {
+  /** plain-html plus `count` small files no earlier run uploaded (Portal reuses what it already holds). */
+  function manyFiles(count) {
+    const project = copyFixture('plain-html')
+    fs.mkdirSync(path.join(project, 'levels', 'many'), { recursive: true })
+    for (let i = 0; i < count; i++) fs.writeFileSync(path.join(project, 'levels', 'many', `${String(i).padStart(3, '0')}.json`), JSON.stringify({ i, seed: randomBytes(16).toString('hex') }))
+    return project
+  }
+  const deployOnce = (project, extra = []) => runCli(['deploy', '--dir', project, '--yes', '--json', '--no-source', '--host', platform.origin, ...extra], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+  /** Every staged file reached Portal byte for byte. */
+  function assertPublishedAll(cli, run, project) {
+    const files = run.deploys.at(-1).files
+    for (let i = 0; i < 40; i++) {
+      const name = `levels/many/${String(i).padStart(3, '0')}.json`
+      assert.equal(sha256(files[name]), sha256(fs.readFileSync(path.join(project, name))), `${name} is published`)
+    }
+  }
+  const knobs = () => platform.state.upload
+  const resetKnobs = () => Object.assign(platform.state.upload, { delayMs: 0, maxInFlight: 0, throttle: 0, throttled: [], expireAfter: null, dropAfter: null, puts: [], stored: [] })
+
+  test('files go up as many at a time as the rules say (default 8), each with its exact Content-Length', async () => {
+    platform.state.script = scriptFor('plain-html')
+    try {
+      resetKnobs()
+      knobs().delayMs = 150
+      let project = manyFiles(40)
+      let m = mark()
+      let cli = await deployOnce(project)
+      let run = since(m)
+      assert.equal(cli.code, 0, cli.stderr)
+      assert.equal(knobs().maxInFlight, 8, 'the default concurrency is reached and never exceeded')
+      assertPublishedAll(cli, run, project)
+      for (const put of run.requests.filter(q => q.method === 'PUT')) assert.equal(put.contentLength, String(put.bytes), `${put.query} declares its length`)
+      report.scenarios.uploadConcurrency = { default: knobs().maxInFlight }
+
+      knobs().maxInFlight = 0
+      project = manyFiles(40)
+      m = mark()
+      cli = await withRules(limits({}, { concurrency: 3 }), () => deployOnce(project))
+      run = since(m)
+      assert.equal(cli.code, 0, cli.stderr)
+      assert.equal(knobs().maxInFlight, 3, 'the served concurrency is what is used')
+      assertPublishedAll(cli, run, project)
+      report.scenarios.uploadConcurrency.served3 = knobs().maxInFlight
+    } finally {
+      resetKnobs()
+    }
+  })
+
+  test('an upload that expires (410) or disappears (404) partway is prepared again and continues with only what is missing', async () => {
+    for (const [knob, status] of [['expireAfter', 410], ['dropAfter', 404]]) {
+      platform.state.script = scriptFor('plain-html')
+      try {
+        resetKnobs()
+        const project = manyFiles(40)
+        knobs()[knob] = 10
+        const m = mark()
+        const cli = await deployOnce(project)
+        const run = since(m)
+        assert.equal(cli.code, 0, `${knob}: ${cli.stderr}`)
+        const prepares = run.requests.filter(q => q.method === 'POST' && q.path === '/api/deploy/source-uploads')
+        assert.equal(prepares.length, 2, `${knob}: prepared again once`)
+        const ids = [...new Set(knobs().puts.map(p => p.id))]
+        assert.equal(ids.length, 2, `${knob}: files went to the first upload, then to the second`)
+        const [first, second] = ids.map(id => knobs().puts.filter(p => p.id === id).map(p => p.path))
+        const storedFirst = knobs().stored.filter(p => p.id === ids[0]).map(p => p.path)
+        assert.ok(storedFirst.length >= 10 && storedFirst.length < 40, `${knob}: ${storedFirst.length} stored before it ended`)
+        for (const p of storedFirst) assert.ok(!second.includes(p), `${knob}: ${p}, stored before the upload ended, is not sent again`)
+        for (let i = 0; i < 40; i++) {
+          const name = `levels/many/${String(i).padStart(3, '0')}.json`
+          assert.ok(storedFirst.includes(name) !== second.includes(name), `${knob}: ${name} is sent to exactly one of the uploads`)
+        }
+        assert.ok(run.requests.some(q => q.method === 'POST' && q.path === `/api/deploy/source-uploads/${ids[1]}/finalize`), `${knob}: the new upload is finalized`)
+        assert.equal(run.deploys.at(-1).fields.sourceUploadId, ids[1])
+        assertPublishedAll(cli, run, project)
+        assert.ok(cli.stderr.includes(`Portal ended the open upload (HTTP ${status}); preparing it again`), `${knob}: the person is told (HTTP ${status})`)
+        report.scenarios[`upload${status}`] = { prepares: prepares.length, firstUpload: first.length, secondUpload: second.length }
+      } finally {
+        resetKnobs()
+      }
+    }
+  })
+
+  test('a throttled file (429) is sent again after the Retry-After Portal asks for', async () => {
+    platform.state.script = scriptFor('plain-html')
+    try {
+      resetKnobs()
+      const project = manyFiles(40)
+      knobs().throttle = 3
+      const m = mark()
+      const cli = await deployOnce(project)
+      const run = since(m)
+      assert.equal(cli.code, 0, cli.stderr)
+      assert.equal(knobs().throttled.length, 3)
+      for (const t of knobs().throttled) {
+        const retry = knobs().puts.find(p => p.path === t.path && p.at > t.at)
+        assert.ok(retry, `${t.path} was sent again`)
+        assert.ok(retry.at - t.at >= 950, `${t.path} waited ${retry.at - t.at} ms (Retry-After: 1)`)
+      }
+      assertPublishedAll(cli, run, project)
+    } finally {
+      resetKnobs()
+    }
   })
 })
 
@@ -924,16 +1081,16 @@ describe('Unity', () => {
     assert.equal(run.sessions[0].revoked, true)
   })
 
-  test('an uncompressed build over 50 MiB is Brotli-compressed for publishing: loader config repointed, precompressed declared, bytes round-trip', async () => {
+  test('an uncompressed build over the served per-file limit is Brotli-compressed for publishing: loader config repointed, precompressed declared, bytes round-trip', async () => {
     platform.state.script = scriptFor('unity')
     const project = copyFixture('unity-webgl-raw')
-    // 60 MiB of data that compresses well, as Unity asset data mostly does.
+    // 12 MiB of data that compresses well, as Unity asset data mostly does, against a served 8 MiB per-file limit.
     const block = randomBytes(64 * 1024)
-    const data = Buffer.concat(Array.from({ length: 960 }, (_, i) => Buffer.concat([block.subarray(0, 4096), Buffer.from(`asset-${i}`.padEnd(60 * 1024, '.'))])))
+    const data = Buffer.concat(Array.from({ length: 192 }, (_, i) => Buffer.concat([block.subarray(0, 4096), Buffer.from(`asset-${i}`.padEnd(60 * 1024, '.'))])))
     fs.writeFileSync(path.join(project, 'Build', 'Orchard.data'), data)
     const beforeHash = treeHash(project)
     const m = mark()
-    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), timeoutMs: 240_000 })
+    const cli = await withRules(limits({ maxFileBytes: 8 * MiB, maxTotalBytes: 64 * MiB }), () => runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN), timeoutMs: 240_000 }))
     const run = since(m)
     fixtureReport('unity-webgl-raw-packed', cli, run, beforeHash, treeHash(project))
     assert.equal(cli.code, 0, cli.stderr)
@@ -941,7 +1098,8 @@ describe('Unity', () => {
     const deploy = run.deploys.at(-1)
     const names = Object.keys(deploy.files).filter(n => n.startsWith('Build/')).sort()
     assert.deepEqual(names, ['Build/Orchard.data.br', 'Build/Orchard.framework.js.br', 'Build/Orchard.loader.js', 'Build/Orchard.wasm.br'])
-    assert.ok(Object.values(deploy.files).every(b => b.length <= 50 * 1024 * 1024))
+    assert.ok(Object.values(deploy.files).every(b => b.length <= 8 * MiB))
+    assert.match(cli.stderr, /Build\/Orchard\.data is 12\.\d MiB; OriginGame accepts 8 MiB per file, 64 MiB in total/, 'the message names the served limits')
     assert.equal(sha(zlib.brotliDecompressSync(deploy.files['Build/Orchard.data.br'])), sha(data), 'the packed data decompresses to the original')
     assert.equal(sha(zlib.brotliDecompressSync(deploy.files['Build/Orchard.wasm.br'])), sha(fixtureBytes('unity-webgl-raw', 'Build/Orchard.wasm')))
     assert.equal(sha(deploy.files['Build/Orchard.loader.js']), sha(fixtureBytes('unity-webgl-raw', 'Build/Orchard.loader.js')), 'the loader itself stays plain')
@@ -957,14 +1115,15 @@ describe('Unity', () => {
   test('a build that is too large even compressed fails with Unity advice before any model call', async () => {
     platform.state.script = scriptFor('unity')
     const project = copyFixture('unity-webgl')
-    fs.writeFileSync(path.join(project, 'StreamingAssets', 'intro.mp4'), randomBytes(51 * 1024 * 1024))
+    fs.writeFileSync(path.join(project, 'StreamingAssets', 'intro.mp4'), randomBytes(9 * MiB))
     const m = mark()
-    const cli = await runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) })
+    const cli = await withRules(limits({ maxFileBytes: 8 * MiB, maxTotalBytes: 64 * MiB }), () => runCli(['deploy', '--dir', project, '--yes', '--json', '--host', platform.origin], { home: signedInHome(platform.origin, DEVICE_TOKEN) }))
     const run = since(m)
     report.scenarios.unityTooLarge = { exitCode: cli.code, result: cli.result }
     assert.equal(cli.code, 1)
     assert.equal(cli.result.error.code, 'upload_failed')
-    assert.match(cli.result.error.message, /StreamingAssets\/intro\.mp4 is 51\.0 MiB/)
+    assert.match(cli.result.error.message, /StreamingAssets\/intro\.mp4 is 9\.0 MiB; OriginGame accepts files up to 8 MiB/)
+    assert.match(cli.result.error.message, /OriginGame accepts files up to 8 MiB and 64 MiB in total\.$/, 'the Unity advice names the served limits')
     assert.match(cli.result.error.message, /texture import settings/)
     assert.match(cli.result.error.message, /Addressables/)
     assert.equal(run.chat.length, 0, 'no model spend')

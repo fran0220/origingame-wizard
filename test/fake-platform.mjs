@@ -20,14 +20,22 @@ export const MODELS = ['deepseek-v4.1-flash', 'deepseek-v4-pro', 'qwen-image-2.1
 
 const sha256 = data => createHash('sha256').update(data).digest('hex')
 
-/** The rules document exactly as the site composes it: rules.json + prompts/*.md + a content version. */
-export function composeRules(dir) {
+/**
+ * The rules document exactly as the site composes it: rules.json + prompts/*.md + a content version.
+ * `patch` replaces top-level keys (a key set to undefined is left out, as an older platform would serve it).
+ */
+export function composeRules(dir, patch = {}) {
   const rules = JSON.parse(fs.readFileSync(path.join(dir, 'rules.json'), 'utf8'))
   const prompts = {}
   for (const name of ['system', 'analyze', 'adapt', 'metadata', 'artwork']) prompts[name] = fs.readFileSync(path.join(dir, 'prompts', `${name}.md`), 'utf8')
-  const body = { ...rules, prompts }
+  const body = JSON.parse(JSON.stringify({ ...rules, prompts, ...patch }))
   return { version: sha256(JSON.stringify(body)).slice(0, 16), ...body }
 }
+
+/** Portal's own source-upload limits (server/src/storage/source-uploads.ts). */
+export const PORTAL_LIMITS = { maxFiles: 20_000, maxFileBytes: 512 * 1024 * 1024, maxTotalBytes: 1024 * 1024 * 1024 }
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 function png(width, height, seed) {
   const image = new PNG({ width, height })
@@ -84,6 +92,10 @@ export async function startPlatform({ rulesDir }) {
     readiness422: false,
     readinessSequence: null,
     script: () => { throw new Error('no model script') },
+    // Top-level keys the served rules replace (e.g. { limits: {...} }); Portal then enforces the served limits.
+    rulesPatch: null,
+    // Portal's source-upload file route: how long each PUT is held, how many overlap, and failures to inject.
+    upload: { delayMs: 0, inFlight: 0, maxInFlight: 0, throttle: 0, throttled: [], expireAfter: null, dropAfter: null, puts: [], stored: [] },
     // AIGCC finals (aigcc/server/src/finals.ts): null = the account's team is not in the finals.
     aigcc: { team: null, open: true, refuseBind: false, submissions: [] },
     agent: { repos: new Map(), commits: new Map(), checkpoints: new Map(), lfs: new Map(), objects: new Map(), receipts: new Map(), bodies: [], raceNextCommit: false },
@@ -308,17 +320,25 @@ export async function startPlatform({ rulesDir }) {
     return fail(res, 404, 'not_found', 'not found')
   }
 
+  /** Counts the requests of one kind that overlap, from their first byte to their answer. */
+  function track(counter, res) {
+    counter.inFlight++
+    counter.maxInFlight = Math.max(counter.maxInFlight, counter.inFlight)
+    res.on('close', () => { counter.inFlight-- })
+  }
+
   async function handle(req, res) {
     const url = new URL(req.url, 'http://fake')
+    if (req.method === 'PUT' && /^\/api\/deploy\/source-uploads\/[^/]+\/files$/.test(url.pathname)) track(state.upload, res)
     const raw = await body(req)
-    const record = { method: req.method, host: req.headers.host ?? null, path: url.pathname, query: url.search, authorization: req.headers.authorization ?? null, repository: req.headers['x-origin-repository'] ?? null, contentType: req.headers['content-type'] ?? null, bytes: raw.length }
+    const record = { method: req.method, host: req.headers.host ?? null, path: url.pathname, query: url.search, authorization: req.headers.authorization ?? null, repository: req.headers['x-origin-repository'] ?? null, contentType: req.headers['content-type'] ?? null, contentLength: req.headers['content-length'] ?? null, bytes: raw.length, at: Date.now() }
     state.requests.push(record)
     const route = `${req.method} ${url.pathname}`
 
     // Public rules (contracts §4).
     if (route === 'GET /wizard/v1/rules.json') {
       if (state.rulesDown) return json(res, 503, { error: 'unavailable' })
-      return json(res, 200, composeRules(rulesDir), { 'cache-control': 'public, max-age=300' })
+      return json(res, 200, composeRules(rulesDir, state.rulesPatch ?? {}), { 'cache-control': 'public, max-age=300' })
     }
 
     // Identity (contracts §1.1–1.3).
@@ -445,32 +465,52 @@ export async function startPlatform({ rulesDir }) {
       }
       if (route === 'POST /api/deploy/source-uploads') {
         const { files: entries } = JSON.parse(raw.toString())
-        // Portal's own limits (server/src/storage/source-uploads.ts): 50 MiB per file, 200 MiB in total.
-        const tooBig = entries.find(e => e.sizeBytes > 50 * 1024 * 1024)
-        if (tooBig || entries.reduce((n, e) => n + e.sizeBytes, 0) > 200 * 1024 * 1024) return json(res, 413, { error: `source upload too large${tooBig ? `: ${tooBig.path}` : ''}` })
+        // Portal's own limits, or the ones the served rules name (the platform serves what Portal enforces).
+        const limits = { ...PORTAL_LIMITS, ...(state.rulesPatch?.limits?.portal ?? {}) }
+        if (entries.length > limits.maxFiles) return json(res, 400, { error: `files must be a nonempty array of at most ${limits.maxFiles} entries` })
+        const tooBig = entries.find(e => e.sizeBytes > limits.maxFileBytes)
+        if (tooBig || entries.reduce((n, e) => n + e.sizeBytes, 0) > limits.maxTotalBytes) return json(res, 413, { error: `source upload too large${tooBig ? `: ${tooBig.path}` : ''}` })
         const sorted = [...entries].sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
         const id = `source_${randomBytes(16).toString('hex')}`
         const manifestHash = sha256(JSON.stringify({ version: 1, files: sorted }))
         const missing = sorted.filter(e => !state.blobs.has(`${owner}:${e.sha256}`)).map(e => e.path)
-        state.uploads.set(id, { owner, entries: sorted, manifestHash, state: 'open', received: [], missing })
-        return json(res, 201, { sourceUploadId: id, expiresAt: Math.floor(Date.now() / 1000) + 900, manifestHash, missing })
+        state.uploads.set(id, { owner, entries: sorted, manifestHash, state: 'open', expired: false, received: [], missing })
+        return json(res, 201, { sourceUploadId: id, expiresAt: Math.floor(Date.now() / 1000) + 3 * 3600, manifestHash, missing })
       }
       let m = /^\/api\/deploy\/source-uploads\/([^/]+)\/files$/.exec(url.pathname)
       if (m && req.method === 'PUT') {
-        const upload = state.uploads.get(decodeURIComponent(m[1]))
+        const knobs = state.upload
+        const id = decodeURIComponent(m[1])
+        const upload = state.uploads.get(id)
         const file = url.searchParams.get('path')
-        const entry = upload?.entries.find(e => e.path === file)
-        if (!upload || !entry) return json(res, 404, { error: 'not found' })
+        knobs.puts.push({ id, path: file, at: Date.now() })
+        if (knobs.delayMs) await wait(knobs.delayMs)
+        if (knobs.throttle > 0) {
+          knobs.throttle--
+          knobs.throttled.push({ path: file, at: Date.now() })
+          return json(res, 429, { error: 'rate limited' }, { 'retry-after': '1' })
+        }
+        if (!upload) return json(res, 404, { error: 'source upload not found' })
+        if (upload.expired) return json(res, 410, { error: 'source upload expired' })
+        const entry = upload.entries.find(e => e.path === file)
+        if (!entry) return json(res, 404, { error: 'source file not in manifest' })
+        if (!/^\d+$/.test(req.headers['content-length'] ?? '')) return json(res, 411, { error: 'Content-Length required' })
         if (Number(req.headers['content-length']) !== raw.length || raw.length !== entry.sizeBytes || sha256(raw) !== entry.sha256) return json(res, 422, { error: 'source file size or sha256 verification mismatch' })
         state.blobs.set(`${owner}:${entry.sha256}`, raw)
         upload.received.push(file)
+        knobs.stored.push({ id, path: file })
+        // Expire (410) or lose (404) this upload after N stored files, once.
+        if (knobs.expireAfter !== null && upload.received.length >= knobs.expireAfter) { upload.expired = true; knobs.expireAfter = null }
+        if (knobs.dropAfter !== null && upload.received.length >= knobs.dropAfter) { state.uploads.delete(id); knobs.dropAfter = null }
         return json(res, 200, { path: file, stored: true })
       }
       m = /^\/api\/deploy\/source-uploads\/([^/]+)\/finalize$/.exec(url.pathname)
       if (m && req.method === 'POST') {
         const upload = state.uploads.get(decodeURIComponent(m[1]))
-        if (!upload) return json(res, 404, { error: 'not found' })
-        if (upload.entries.some(e => !state.blobs.has(`${owner}:${e.sha256}`))) return json(res, 409, { error: 'upload incomplete' })
+        if (!upload) return json(res, 404, { error: 'source upload not found' })
+        if (upload.expired) return json(res, 410, { error: 'source upload expired' })
+        const absent = upload.entries.filter(e => !state.blobs.has(`${owner}:${e.sha256}`)).map(e => e.path)
+        if (absent.length) return json(res, 409, { error: 'source upload is incomplete', missing: absent })
         upload.state = 'finalized'
         return json(res, 200, { sourceUploadId: m[1], state: 'finalized', manifestHash: upload.manifestHash })
       }

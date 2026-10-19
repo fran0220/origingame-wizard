@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import zlib from 'node:zlib'
-import { PORTAL_LIMITS } from './constants.js'
+import { formatBytes, type Limits } from './constants.js'
 import { WizardError } from './errors.js'
-import { listFiles, readText, sha256File } from './files.js'
+import { hashFile, listFiles, readText } from './files.js'
 
 /**
  * Unity: the local editor (found the way Unity Hub installs it), the editor
@@ -328,11 +328,11 @@ export function mergeRuntime(site: string, fields: Record<string, true>): boolea
 
 export interface PackPlan { files: Array<{ path: string; ref: string }>; reason: string }
 
-const overLimits = (sizes: Map<string, number>) => {
+const overLimits = (sizes: Map<string, number>, limits: Limits) => {
   let total = 0
   let big: string | null = null
-  for (const [file, bytes] of sizes) { total += bytes; if (bytes > PORTAL_LIMITS.maxFileBytes && !big) big = file }
-  return { total, big, over: total > PORTAL_LIMITS.maxTotalBytes || big !== null }
+  for (const [file, bytes] of sizes) { total += bytes; if (bytes > limits.portal.maxFileBytes && !big) big = file }
+  return { total, big, over: total > limits.portal.maxTotalBytes || big !== null }
 }
 
 export function sizesOf(site: string): Map<string, number> {
@@ -340,12 +340,12 @@ export function sizesOf(site: string): Map<string, number> {
 }
 
 /** Advice for a Unity build that is too large, in Unity's own menu names. */
-export function unitySizeAdvice(build: UnityBuild | null): string {
+export function unitySizeAdvice(build: UnityBuild | null, limits: Limits): string {
   return [
     build && build.compression === 'none' ? 'enable compression (Player Settings > Publishing Settings > Compression Format: Brotli),' : null,
     'lower texture sizes (Max Size and Compression in the texture import settings, or Crunch Compression),',
     'set Managed Stripping Level to High and leave out unused scenes and assets, and load large optional content',
-    'with Addressables from a CDN you control (it must allow cross-origin requests). OriginGame accepts files up to 50 MiB and 200 MiB in total.',
+    `with Addressables from a CDN you control (it must allow cross-origin requests). OriginGame accepts files up to ${formatBytes(limits.portal.maxFileBytes)} and ${formatBytes(limits.portal.maxTotalBytes)} in total.`,
   ].filter(Boolean).join(' ')
 }
 
@@ -354,10 +354,10 @@ export function unitySizeAdvice(build: UnityBuild | null): string {
  * fits, or null when it already fits or packing cannot be done safely. Every
  * packed file must be named exactly once in the page's loader config.
  */
-export function planPack(site: string, entry: string): PackPlan | null | { refused: string } {
+export function planPack(site: string, entry: string, limits: Limits): PackPlan | null | { refused: string } {
   const build = unityBuildIn(site, entry)
   const sizes = sizesOf(site)
-  if (!overLimits(sizes).over) return null
+  if (!overLimits(sizes, limits).over) return null
   if (!build || build.legacy) return null
   if (build.compression !== 'none') return null
   const targets = build.files.filter(f => f.role === 'data' || f.role === 'framework' || f.role === 'code')
@@ -371,7 +371,7 @@ export function planPack(site: string, entry: string): PackPlan | null | { refus
     if (refs.length !== 1) return { refused: `${entry} names ${name} ${refs.length} times in its loader config (expected once), so the Wizard cannot point it at a compressed copy` }
     files.push({ path: target.path, ref: refs[0]![0] })
   }
-  const big = overLimits(sizes)
+  const big = overLimits(sizes, limits)
   return { files, reason: big.big ? `${big.big} is ${(sizes.get(big.big)! / 1048576).toFixed(1)} MiB` : `the build is ${(big.total / 1048576).toFixed(1)} MiB` }
 }
 
@@ -385,14 +385,14 @@ async function brotli(from: string, to: string, quality: number): Promise<void> 
  * pass of the same run reuses them) and returns the sizes the release would
  * have. Nothing in `site` changes.
  */
-export async function compressPlanned(site: string, plan: PackPlan, cache: string): Promise<Map<string, { packed: string; bytes: number }>> {
+export async function compressPlanned(site: string, plan: PackPlan, cache: string, limits: Limits): Promise<Map<string, { packed: string; bytes: number }>> {
   fs.mkdirSync(cache, { recursive: true })
   const out = new Map<string, { packed: string; bytes: number }>()
   for (const quality of [9, 11]) {
     out.clear()
     for (const file of plan.files) {
       const source = path.join(site, file.path)
-      const packed = path.join(cache, `${sha256File(source)}.q${quality}.br`)
+      const packed = path.join(cache, `${(await hashFile(source)).sha256}.q${quality}.br`)
       if (!fs.existsSync(packed)) {
         await brotli(source, `${packed}.tmp`, quality)
         fs.renameSync(`${packed}.tmp`, packed)
@@ -401,16 +401,16 @@ export async function compressPlanned(site: string, plan: PackPlan, cache: strin
     }
     const sizes = sizesOf(site)
     for (const [file, p] of out) { sizes.delete(file); sizes.set(`${file}.br`, p.bytes) }
-    if (!overLimits(sizes).over) break
+    if (!overLimits(sizes, limits).over) break
   }
   return out
 }
 
 /** Whether the sizes after packing fit, and if not why. */
-export function packedFits(site: string, packed: Map<string, { bytes: number }>): string | null {
+export function packedFits(site: string, packed: Map<string, { bytes: number }>, limits: Limits): string | null {
   const sizes = sizesOf(site)
   for (const [file, p] of packed) { sizes.delete(file); sizes.set(`${file}.br`, p.bytes) }
-  const after = overLimits(sizes)
+  const after = overLimits(sizes, limits)
   if (!after.over) return null
   return after.big ? `${after.big} is still ${(sizes.get(after.big)! / 1048576).toFixed(1)} MiB after Brotli compression` : `the build is still ${(after.total / 1048576).toFixed(1)} MiB after Brotli compression`
 }

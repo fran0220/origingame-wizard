@@ -6,7 +6,7 @@ import { normalizeHost } from './args.js'
 import { makeArtwork } from './artwork.js'
 import { buildProject } from './build.js'
 import { onCleanup } from './cleanup.js'
-import { AGENT_CLIENT, DEFAULT_HOST, type Engine } from './constants.js'
+import { AGENT_CLIENT, DEFAULT_HOST, formatBytes, type Engine, type Limits } from './constants.js'
 import { classifyEngine, classifyFamily, detectProject, UNITY_CACHE_DIRS, type Detection } from './detect.js'
 import { buildDigest, ContextReader } from './digest.js'
 import { WizardError } from './errors.js'
@@ -211,23 +211,23 @@ const MiB = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MiB`
  * uncompressed Unity build that is too large is compressed (into a cache, the
  * staged copy is unchanged until `pack`) to see whether it would fit.
  */
-async function precheck(site: string, entry: string, cache: string, ui: Ui): Promise<void> {
+async function precheck(site: string, entry: string, cache: string, ui: Ui, limits: Limits): Promise<void> {
   const page = fs.existsSync(path.join(site, 'index.html')) ? 'index.html' : entry
   const unity = unityBuildIn(site, page)
-  const plan = unity ? planPack(site, page) : null
-  if (plan && 'refused' in plan) throw new WizardError('upload_failed', `the Unity build is over OriginGame's limits and ${plan.refused}. ${unitySizeAdvice(unity)}`)
+  const plan = unity ? planPack(site, page, limits) : null
+  if (plan && 'refused' in plan) throw new WizardError('upload_failed', `the Unity build is over OriginGame's limits and ${plan.refused}. ${unitySizeAdvice(unity, limits)}`)
   if (plan) {
     const s = ui.spinner(`The Unity build is uncompressed and too large (${plan.reason}); checking whether Brotli compression makes it fit`)
-    const packed = await compressPlanned(site, plan, cache)
-    const still = packedFits(site, packed)
-    if (still) { s.fail('Too large even compressed'); throw new WizardError('upload_failed', `${still}. ${unitySizeAdvice(unity)}`) }
+    const packed = await compressPlanned(site, plan, cache, limits)
+    const still = packedFits(site, packed, limits)
+    if (still) { s.fail('Too large even compressed'); throw new WizardError('upload_failed', `${still}. ${unitySizeAdvice(unity, limits)}`) }
     s.stop(`Compressed with Brotli it fits (${MiB([...packed.values()].reduce((n, p) => n + p.bytes, 0))} for ${plan.files.length} build files); it is compressed for publishing`)
     return
   }
   try {
-    precheckPortalLimits(site)
+    precheckPortalLimits(site, limits)
   } catch (error) {
-    if (unity && error instanceof WizardError && /MiB/.test(error.message)) throw new WizardError('upload_failed', `${error.message}. ${unitySizeAdvice(unity)}`)
+    if (unity && error instanceof WizardError && /MiB/.test(error.message)) throw new WizardError('upload_failed', `${error.message}. ${unitySizeAdvice(unity, limits)}`)
     throw error
   }
 }
@@ -411,7 +411,7 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     }
 
     // 4. The game this folder publishes to.
-    const portal = new Portal(host, portalAuth)
+    const portal = new Portal(host, portalAuth, rules.limits)
     const finals = sandbox || options.aigcc === false ? null : await aigccFinals(options, ui, portal, guided)
     let preferred: string | undefined
     if (finals?.game && !options.game) preferred = (await portal.mine())?.some(g => g.id === finals.game!.gameId) ? finals.game.gameId : undefined
@@ -465,17 +465,17 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       for (const w of built.warnings) ui.warn(w)
       const staged = stageCopy(built.outputDir, site)
       if (staged.excluded.length) ui.info(`Left out of the upload: ${staged.excluded.slice(0, 8).map(e => `${e.path} (${e.reason})`).join(', ')}${staged.excluded.length > 8 ? ` and ${staged.excluded.length - 8} more` : ''}`)
-      await precheck(site, built.entry, packCache, ui)
+      await precheck(site, built.entry, packCache, ui, rules.limits)
       return built
     }
     const packCache = path.join(stageDir, 'pack')
     /** Brotli for an uncompressed Unity build that is over the limits: the last step before the manifest, never mirrored to the workspace. */
     const pack = async (entry: string) => {
       const page = fs.existsSync(path.join(site, 'index.html')) ? 'index.html' : entry
-      const plan = planPack(site, page)
+      const plan = planPack(site, page, rules.limits)
       if (!plan || 'refused' in plan) return
-      const s = ui.spinner(`Compressing the Unity build with Brotli (${plan.reason}; OriginGame accepts 50 MiB per file, 200 MiB in total)`)
-      const done = applyPack(site, page, plan, await compressPlanned(site, plan, packCache))
+      const s = ui.spinner(`Compressing the Unity build with Brotli (${plan.reason}; OriginGame accepts ${formatBytes(rules.limits.portal.maxFileBytes)} per file, ${formatBytes(rules.limits.portal.maxTotalBytes)} in total)`)
+      const done = applyPack(site, page, plan, await compressPlanned(site, plan, packCache, rules.limits))
       s.stop(`Compressed ${plan.files.length} Unity build file${plan.files.length === 1 ? '' : 's'} with Brotli`)
       adaptations.push(...done)
       if (!warnings.some(w => w.code === 'unity.compressed')) warnings.push({ code: 'unity.compressed', message: `the Unity build was too large uncompressed (${plan.reason}); the Wizard Brotli-compressed ${plan.files.map(f => f.path).join(', ')} for this release. Set Player Settings > Publishing Settings > Compression Format to Brotli to ship it that way yourself.` })
@@ -570,8 +570,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
     const orientation = chosen.find(i => i.kind === 'orientation')?.value ?? 'any'
 
     await pack(built.entry)
-    let manifest = stageManifest(site)
-    checkPortalLimits(manifest)
+    let manifest = await stageManifest(site)
+    checkPortalLimits(manifest, rules.limits)
     warnings.push(...await secretWarnings(site, ui))
     ui.step(`Staged ${manifest.entries.length} files (${(manifest.totalBytes / 1048576).toFixed(1)} MiB), sha256 ${manifest.hash.slice(0, 16)}`)
 
@@ -711,8 +711,8 @@ export async function deploy(options: Options, ui: Ui, telemetry: Telemetry): Pr
       built = await prepare()
       replay(built)
       await pack(built.entry)
-      manifest = stageManifest(site)
-      checkPortalLimits(manifest)
+      manifest = await stageManifest(site)
+      checkPortalLimits(manifest, rules.limits)
       outcome = await publishOnce(outcome ? outcome.published.gameId : gameId)
       integration = { applied: false, reason: dropped }
       warnings.push({ code: 'integration.dropped', message: dropped })

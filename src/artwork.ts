@@ -32,10 +32,10 @@ function previewPage(dir: string, title: string, candidates: Candidate[]): strin
 }
 
 /** The person's own image, checked and normalized the same way as a generated one. */
-async function ownImage(ui: Ui, kind: ImageKind, output: { width: number; height: number }): Promise<Buffer | null> {
+async function ownImage(ui: Ui, kind: ImageKind, output: { width: number; height: number }, maxBytes: number): Promise<Buffer | null> {
   const file = await ui.text(`Path to your ${kind} image (PNG or JPEG)`, '', v => (fs.existsSync(v) ? undefined : 'file not found'))
   try {
-    return normalizeImage(kind, fs.readFileSync(file), output)
+    return normalizeImage(kind, fs.readFileSync(file), output, maxBytes)
   } catch (error) {
     ui.warn(`${file}: ${(error as Error).message}`)
     return null
@@ -71,7 +71,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
     if (!list.length) throw new WizardError('artwork_failed', `the artwork prompts had no ${kind}`)
     const settled = await Promise.allSettled(list.map(async (prompt, i) => {
       const image = await client.image(imageModel, prompt, rule.size, rule.fallback)
-      const bytes = normalizeImage(kind, image.bytes, output)
+      const bytes = normalizeImage(kind, image.bytes, output, rules.limits.portal.maxImageBytes)
       const file = path.join(dir, `${kind}-${attempt}-${i + 1}.jpg`)
       fs.writeFileSync(file, bytes)
       return { kind, index: i + 1, file, prompt }
@@ -110,7 +110,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
       ], options[0]!.file)
       if (choice === 'again') return 'again'
       if (choice === 'own') {
-        const own = await ownImage(ui, kind, parseSize(rules.images[kind].output))
+        const own = await ownImage(ui, kind, parseSize(rules.images[kind].output), rules.limits.portal.maxImageBytes)
         return own ?? fs.readFileSync(options[0]!.file)
       }
       return fs.readFileSync(choice)
@@ -119,7 +119,7 @@ export async function makeArtwork(client: ModelClient, rules: Rules, ui: Ui, dir
     if (cover === 'again') { attempt++; continue }
     const poster = await pick('poster')
     if (poster === 'again') { attempt++; continue }
-    if (!acceptable('cover', cover) || !acceptable('poster', poster)) throw new WizardError('artwork_failed', 'the chosen artwork does not meet the platform image rules')
+    if (!acceptable('cover', cover, rules.limits.portal.maxImageBytes) || !acceptable('poster', poster, rules.limits.portal.maxImageBytes)) throw new WizardError('artwork_failed', 'the chosen artwork does not meet the platform image rules')
     const coverPath = path.join(dir, 'cover.jpg')
     const posterPath = path.join(dir, 'poster.jpg')
     fs.writeFileSync(coverPath, cover)

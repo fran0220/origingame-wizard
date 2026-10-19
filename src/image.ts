@@ -1,6 +1,6 @@
 import jpeg from 'jpeg-js'
 import { PNG } from 'pngjs'
-import { IMAGE_RULES, PORTAL_LIMITS } from './constants.js'
+import { DEFAULT_LIMITS, IMAGE_RULES } from './constants.js'
 
 export type ImageKind = 'cover' | 'poster'
 
@@ -25,10 +25,10 @@ export function imageSize(bytes: Buffer): { width: number; height: number; type:
   return null
 }
 
-/** Portal's acceptance rule for a cover (16:9, ≥ 640×360) or poster (3:4, ≥ 600×800), ≤ 5 MB. */
-export function acceptable(kind: ImageKind, bytes: Buffer): boolean {
+/** Portal's acceptance rule for a cover (16:9, ≥ 640×360) or poster (3:4, ≥ 600×800), at most `maxBytes` (`limits.portal.maxImageBytes`). */
+export function acceptable(kind: ImageKind, bytes: Buffer, maxBytes = DEFAULT_LIMITS.portal.maxImageBytes): boolean {
   const size = imageSize(bytes)
-  if (!size || bytes.length > PORTAL_LIMITS.maxImageBytes) return false
+  if (!size || bytes.length > maxBytes) return false
   const rule = IMAGE_RULES[kind]
   return size.width >= rule.minWidth && size.height >= rule.minHeight && Math.abs(size.width / size.height - rule.ratio) <= rule.tolerance
 }
@@ -86,13 +86,13 @@ function cropResize(source: Raster, width: number, height: number): Raster {
 
 /**
  * Turns any generated or person-supplied image into what Portal accepts:
- * center-cropped to the exact aspect, scaled to `output`, JPEG under 5 MB.
+ * center-cropped to the exact aspect, scaled to `output`, JPEG of at most `maxBytes`.
  */
-export function normalizeImage(kind: ImageKind, bytes: Buffer, output: { width: number; height: number }): Buffer {
+export function normalizeImage(kind: ImageKind, bytes: Buffer, output: { width: number; height: number }, maxBytes = DEFAULT_LIMITS.portal.maxImageBytes): Buffer {
   const raster = cropResize(decode(bytes), output.width, output.height)
   for (const quality of [90, 82, 72, 60]) {
     const encoded = jpeg.encode({ width: raster.width, height: raster.height, data: Buffer.from(raster.data.buffer, raster.data.byteOffset, raster.data.byteLength) }, quality).data
-    if (acceptable(kind, encoded)) return encoded
+    if (acceptable(kind, encoded, maxBytes)) return encoded
   }
   throw new Error(`could not produce an acceptable ${kind}`)
 }

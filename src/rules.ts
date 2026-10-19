@@ -1,4 +1,4 @@
-import { PORTAL_ENGINES, RULES_PATH, type Engine } from './constants.js'
+import { DEFAULT_LIMITS, LIMIT_BOUNDS, PORTAL_ENGINES, RULES_PATH, type Engine, type Limits } from './constants.js'
 import { WizardError } from './errors.js'
 import { request } from './http.js'
 
@@ -40,6 +40,8 @@ export interface Rules {
   engines: Array<{ id: Engine; markers: string[] }>
   families: Family[]
   genres: string[]
+  /** Portal's upload limits and the upload concurrency (`limits`, 0.5.0; older versions ignore it). */
+  limits: Limits
 }
 
 const FAMILY_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
@@ -62,6 +64,28 @@ export function parseFamilies(value: unknown): Family[] {
     out.push({ id: f.id, label, engine, markers: f.markers as string[], generated: f.generated === true, locate: f.locate === true })
   }
   return out
+}
+
+/**
+ * `limits` is optional and read leniently, like `families`: a missing or
+ * malformed value keeps this version's default, and a number outside
+ * `LIMIT_BOUNDS` is clamped into it, so a typo in the document can neither
+ * stop every run nor make the Wizard open thousands of connections.
+ */
+export function parseLimits(value: unknown): Limits {
+  const section = <K extends keyof Limits>(key: K): Limits[K] => {
+    const raw = value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
+    const defaults = DEFAULT_LIMITS[key] as Record<string, number>
+    const bounds = LIMIT_BOUNDS[key] as Record<string, readonly [number, number]>
+    const out: Record<string, number> = {}
+    for (const name of Object.keys(defaults)) {
+      const given = raw && typeof raw === 'object' ? (raw as Record<string, unknown>)[name] : undefined
+      const [min, max] = bounds[name]!
+      out[name] = typeof given === 'number' && Number.isFinite(given) ? Math.min(max, Math.max(min, Math.floor(given))) : defaults[name]!
+    }
+    return out as Limits[K]
+  }
+  return { portal: section('portal'), upload: section('upload') }
 }
 
 const SIZE = /^(\d{2,5})x(\d{2,5})$/
@@ -115,6 +139,7 @@ export function validateRules(value: any): Rules {
     engines: parsedEngines,
     families: parseFamilies(value.families),
     genres,
+    limits: parseLimits(value.limits),
   }
 }
 

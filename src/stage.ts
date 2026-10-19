@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { PORTAL_LIMITS } from './constants.js'
+import { formatBytes, type Limits } from './constants.js'
 import { WizardError } from './errors.js'
-import { listFiles, sha256 } from './files.js'
+import { hashFile, listFiles, sha256 } from './files.js'
 import { isSecretFile } from './secrets.js'
 
 export interface Excluded { path: string; reason: string }
@@ -46,35 +46,48 @@ export function stageCopy(outputDir: string, site: string): { files: string[]; e
 export interface ManifestEntry { path: string; sizeBytes: number; sha256: string }
 export interface Manifest { entries: ManifestEntry[]; hash: string; totalBytes: number; local: Map<string, string> }
 
-/** The canonical source manifest, hashed exactly as Portal hashes it (`stageSha256`). */
-export function stageManifest(site: string): Manifest {
+/**
+ * The canonical source manifest, hashed exactly as Portal hashes it
+ * (`stageSha256`). Files are read as streams, a few at a time, so memory stays
+ * bounded whatever their size.
+ */
+export async function stageManifest(site: string): Promise<Manifest> {
   const local = new Map<string, string>()
-  const entries = listFiles(site).map(file => {
-    const data = fs.readFileSync(path.join(site, file))
-    const name = file.normalize('NFC')
-    local.set(name, path.join(site, file))
-    return { path: name, sizeBytes: data.byteLength, sha256: sha256(data) }
-  }).sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
+  const files = listFiles(site)
+  const entries: ManifestEntry[] = new Array(files.length)
+  let next = 0
+  const worker = async () => {
+    for (let i = next++; i < files.length; i = next++) {
+      const file = files[i]!
+      const { sha256: digest, size } = await hashFile(path.join(site, file))
+      const name = file.normalize('NFC')
+      local.set(name, path.join(site, file))
+      entries[i] = { path: name, sizeBytes: size, sha256: digest }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker))
+  entries.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
   const json = JSON.stringify({ version: 1, files: entries })
   return { entries, hash: sha256(json), totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local }
 }
 
 /** The same limits from sizes alone (no hashing), right after staging and before any model call. */
-export function precheckPortalLimits(site: string): void {
+export function precheckPortalLimits(site: string, limits: Limits): void {
   const entries = listFiles(site).map(file => ({ path: file.normalize('NFC'), sizeBytes: fs.statSync(path.join(site, file)).size, sha256: '' }))
   const ignoreEntry = { entries: entries.some(e => e.path === 'index.html') ? entries : [...entries, { path: 'index.html', sizeBytes: 0, sha256: '' }] }
-  checkPortalLimits({ ...ignoreEntry, hash: '', totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local: new Map() })
+  checkPortalLimits({ ...ignoreEntry, hash: '', totalBytes: entries.reduce((sum, e) => sum + e.sizeBytes, 0), local: new Map() }, limits)
 }
 
 /** Fails before any upload (or model spend) when Portal would refuse the files. */
-export function checkPortalLimits(manifest: Manifest): void {
+export function checkPortalLimits(manifest: Manifest, limits: Limits): void {
   const { entries } = manifest
+  const { maxFiles, maxFileBytes, maxTotalBytes } = limits.portal
   if (!entries.some(e => e.path === 'index.html')) throw new WizardError('upload_failed', 'the staged build has no index.html at its root')
-  if (entries.length > PORTAL_LIMITS.maxFiles) throw new WizardError('upload_failed', `the build has ${entries.length} files; OriginGame accepts at most ${PORTAL_LIMITS.maxFiles}`)
-  if (manifest.totalBytes > PORTAL_LIMITS.maxTotalBytes) throw new WizardError('upload_failed', `the build is ${(manifest.totalBytes / 1048576).toFixed(1)} MiB; OriginGame accepts at most 200 MiB`)
+  if (entries.length > maxFiles) throw new WizardError('upload_failed', `the build has ${entries.length} files; OriginGame accepts at most ${maxFiles.toLocaleString('en-US')}`)
+  if (manifest.totalBytes > maxTotalBytes) throw new WizardError('upload_failed', `the build is ${(manifest.totalBytes / 1048576).toFixed(1)} MiB; OriginGame accepts at most ${formatBytes(maxTotalBytes)} in total`)
   const folded = new Set<string>()
   for (const entry of entries) {
-    if (entry.sizeBytes > PORTAL_LIMITS.maxFileBytes) throw new WizardError('upload_failed', `${entry.path} is ${(entry.sizeBytes / 1048576).toFixed(1)} MiB; OriginGame accepts files up to 50 MiB`)
+    if (entry.sizeBytes > maxFileBytes) throw new WizardError('upload_failed', `${entry.path} is ${(entry.sizeBytes / 1048576).toFixed(1)} MiB; OriginGame accepts files up to ${formatBytes(maxFileBytes)}`)
     if (entry.path.length > 1024 || entry.path.includes('%') || entry.path.includes('\\') || /[\x00-\x1f\x7f]/.test(entry.path)) {
       throw new WizardError('upload_failed', `OriginGame does not accept the file name ${JSON.stringify(entry.path)} (no %, backslash or control characters); rename it in your project`)
     }

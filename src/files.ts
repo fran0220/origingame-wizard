@@ -50,8 +50,15 @@ export function sha256(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex')
 }
 
-export function sha256File(file: string): string {
-  return sha256(fs.readFileSync(file))
+/** A file's sha256 and size, read as a stream (a build file may be hundreds of MiB). */
+export async function hashFile(file: string): Promise<{ sha256: string; size: number }> {
+  const hash = createHash('sha256')
+  let size = 0
+  for await (const chunk of fs.createReadStream(file, { highWaterMark: 1024 * 1024 })) {
+    hash.update(chunk as Buffer)
+    size += (chunk as Buffer).length
+  }
+  return { sha256: hash.digest('hex'), size }
 }
 
 /**

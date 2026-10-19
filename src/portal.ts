@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import fs from 'node:fs'
+import { DEFAULT_LIMITS, type Limits } from './constants.js'
 import { WizardError } from './errors.js'
-import { describe, request, sleep, NetworkError, type HttpResponse } from './http.js'
+import { describe, request, retryAfterMs, sendFile, sleep, NetworkError, type HttpResponse } from './http.js'
 import type { Manifest } from './stage.js'
 import type { PortalAuth } from './session.js'
 import type { Ui } from './ui.js'
@@ -13,8 +13,22 @@ import type { Ui } from './ui.js'
 /** One of the account's games as `GET /api/deploy/mine` lists it. */
 export interface OwnGame { id: string; title: string; version: number; unlisted: boolean }
 
+/** Answers worth sending the same request again for: throttling, a busy or restarting server, a gateway in between. */
+const TRANSIENT = new Set([408, 429, 500, 502, 503, 504])
+/** How often an upload starts over with a fresh upload id after Portal reports the open one expired or gone. */
+const MAX_RESUMES = 3
+
+/** The wait before attempt `attempt + 1`: what the server asked for (capped), else exponential. */
+function backoff(attempt: number, response?: HttpResponse): number {
+  const asked = response ? retryAfterMs(response) : null
+  if (asked !== null) return Math.min(60_000, Math.max(250, asked))
+  return Math.min(30_000, 1000 * 2 ** attempt)
+}
+
+const MiB = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MiB`
+
 export class Portal {
-  constructor(readonly host: string, private readonly auth: PortalAuth) {}
+  constructor(readonly host: string, private readonly auth: PortalAuth, private readonly limits: Limits = DEFAULT_LIMITS) {}
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
@@ -24,25 +38,58 @@ export class Portal {
     }
   }
 
-  private async call(path: string, options: { method?: string; json?: unknown; body?: NonNullable<RequestInit['body']>; headers?: Record<string, string>; timeoutMs?: number }, failure: 'upload_failed' | 'publish_failed'): Promise<HttpResponse> {
+  /**
+   * One Portal request, sent again on a network error or a gateway answer. With
+   * `throttle` (the upload routes) a 429, 408 or 500 is retried as well, after
+   * the Retry-After the server asks for.
+   */
+  private async call(path: string, options: { method?: string; json?: unknown; body?: NonNullable<RequestInit['body']>; headers?: Record<string, string>; timeoutMs?: number; throttle?: boolean }, failure: 'upload_failed' | 'publish_failed'): Promise<HttpResponse> {
     let last: unknown
-    for (let attempt = 0; attempt < 4; attempt++) {
+    const attempts = options.throttle ? 6 : 4
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const response = await request(`${this.host}${path}`, { ...options, headers: this.headers(options.headers), timeoutMs: options.timeoutMs ?? 120_000 })
-        if (response.status === 503 || response.status === 502 || response.status === 504) { last = new Error(describe(response)); await sleep(1000 * 2 ** attempt); continue }
+        const retry = options.throttle ? TRANSIENT.has(response.status) : (response.status === 503 || response.status === 502 || response.status === 504)
+        if (retry && attempt < attempts - 1) { last = new Error(describe(response)); await sleep(backoff(attempt, response)); continue }
+        if (retry) throw new WizardError(failure, `${path}: ${describe(response)}`)
         return response
       } catch (error) {
         if (!(error instanceof NetworkError)) throw error
         last = error
-        await sleep(1000 * 2 ** attempt)
+        if (attempt < attempts - 1) await sleep(backoff(attempt))
       }
     }
     throw new WizardError(failure, `${path}: ${(last as Error)?.message ?? 'unreachable'}`)
   }
 
-  /** Uploads only the files Portal does not already hold (by sha256) and returns the finalized upload id. */
-  async upload(manifest: Manifest, ui: Ui): Promise<{ sourceUploadId: string; uploaded: number; reused: number }> {
-    const prepared = await this.call('/api/deploy/source-uploads', { method: 'POST', json: { files: manifest.entries } }, 'upload_failed')
+  /**
+   * One file's bytes, streamed from disk. Transient answers and network
+   * failures are retried (the route is idempotent: the content is addressed by
+   * its sha256); the answer is returned otherwise, including 404 and 410.
+   */
+  private async putFile(id: string, file: string, local: string, size: number, signal: AbortSignal): Promise<HttpResponse> {
+    const url = `${this.host}/api/deploy/source-uploads/${encodeURIComponent(id)}/files?path=${encodeURIComponent(file)}`
+    let last: unknown
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (signal.aborted) throw signal.reason
+      try {
+        const response = await sendFile(url, local, { method: 'PUT', size, signal, headers: this.headers({ 'content-type': 'application/octet-stream' }) })
+        if (!TRANSIENT.has(response.status)) return response
+        last = new Error(describe(response))
+        if (attempt < 5) await sleep(backoff(attempt, response))
+      } catch (error) {
+        if (signal.aborted) throw signal.reason
+        if (!(error instanceof NetworkError)) throw new WizardError('upload_failed', `${file}: ${(error as Error).message}`)
+        last = error
+        if (attempt < 5) await sleep(backoff(attempt))
+      }
+    }
+    throw new WizardError('upload_failed', `${file}: ${(last as Error)?.message ?? 'unreachable'}`)
+  }
+
+  /** Offers the manifest; Portal answers the upload id and which files it does not already hold. */
+  private async prepare(manifest: Manifest): Promise<{ id: string; missing: string[] }> {
+    const prepared = await this.call('/api/deploy/source-uploads', { method: 'POST', json: { files: manifest.entries }, throttle: true }, 'upload_failed')
     if (prepared.status === 401) throw new WizardError(this.auth.repositoryId ? 'upload_failed' : 'not_logged_in', `Portal refused the credential for uploads (${describe(prepared)})`)
     if (!prepared.ok || typeof prepared.json?.sourceUploadId !== 'string' || !Array.isArray(prepared.json?.missing)) {
       throw new WizardError('upload_failed', `could not start the upload: ${describe(prepared)}`)
@@ -50,36 +97,81 @@ export class Portal {
     if (typeof prepared.json.manifestHash === 'string' && prepared.json.manifestHash !== manifest.hash) {
       throw new WizardError('upload_failed', 'Portal computed a different manifest hash for these files')
     }
-    const id = prepared.json.sourceUploadId as string
-    const missing = (prepared.json.missing as unknown[]).map(String)
+    return { id: prepared.json.sourceUploadId as string, missing: (prepared.json.missing as unknown[]).map(String) }
+  }
+
+  /**
+   * Uploads only the files Portal does not already hold (by sha256),
+   * `limits.upload.concurrency` at a time, and returns the finalized upload
+   * id. An upload that expired (410) or is gone (404) is prepared again and
+   * continues with what the new one is missing: the files already sent are
+   * content-addressed and are not sent twice.
+   */
+  async upload(manifest: Manifest, ui: Ui): Promise<{ sourceUploadId: string; uploaded: number; reused: number }> {
     const byPath = new Map(manifest.entries.map(e => [e.path, e]))
-    const s = ui.spinner(`Uploading ${missing.length} of ${manifest.entries.length} files (the rest are unchanged)`)
-    let done = 0
+    const sent = new Set<string>()
+    let s: ReturnType<Ui['spinner']> | null = null
+    try {
+      for (let round = 0; ; round++) {
+        const { id, missing } = await this.prepare(manifest)
+        const bytes = missing.reduce((n, p) => n + (byPath.get(p)?.sizeBytes ?? 0), 0)
+        const workers = Math.max(1, Math.min(this.limits.upload.concurrency, missing.length))
+        s = round === 0
+          ? ui.spinner(`Uploading ${missing.length} of ${manifest.entries.length} files, ${MiB(bytes)} (the rest are unchanged)${missing.length > 1 ? `, ${workers} at a time` : ''}`)
+          : ui.spinner(`Resuming the upload: ${missing.length} files, ${MiB(bytes)} left`)
+        const gone = await this.sendMissing(id, missing, manifest, workers, (done, doneBytes) => s!.update(`Uploading ${done}/${missing.length} (${MiB(doneBytes)} of ${MiB(bytes)})`), sent)
+        if (gone) s.stop(`Portal ended the open upload (HTTP ${gone}); preparing it again`)
+        else {
+          const finalized = await this.call(`/api/deploy/source-uploads/${encodeURIComponent(id)}/finalize`, { method: 'POST', throttle: true }, 'upload_failed')
+          if (finalized.ok) {
+            const reused = manifest.entries.length - sent.size
+            s.stop(`Uploaded ${sent.size} file${sent.size === 1 ? '' : 's'}, reused ${reused}`)
+            return { sourceUploadId: id, uploaded: sent.size, reused }
+          }
+          // Expired or gone since the last file, or Portal no longer holds a file: prepare again.
+          if (!(finalized.status === 404 || finalized.status === 410 || (finalized.status === 409 && Array.isArray(finalized.json?.missing)))) {
+            throw new WizardError('upload_failed', `could not finalize the upload: ${describe(finalized)}`)
+          }
+          s.stop(`Portal did not finalize the upload (${describe(finalized)}); preparing it again`)
+        }
+        if (round >= MAX_RESUMES) throw new WizardError('upload_failed', `the upload kept expiring on Portal (${round + 1} attempts); run again (files already sent are reused)`)
+      }
+    } catch (error) {
+      s?.fail('Upload failed')
+      throw error
+    }
+  }
+
+  /** Sends `missing` to upload `id`; the status (410 or 404) when Portal reported the upload expired or gone partway, else null. */
+  private async sendMissing(id: string, missing: string[], manifest: Manifest, workers: number, progress: (done: number, bytes: number) => void, sent: Set<string>): Promise<number | null> {
+    const byPath = new Map(manifest.entries.map(e => [e.path, e]))
+    const stop = new AbortController()
     const queue = [...missing]
+    let gone: number | null = null
+    let failure: unknown = null
+    let done = 0
+    let doneBytes = 0
     const worker = async () => {
-      for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      for (let next = queue.shift(); next !== undefined && !stop.signal.aborted; next = queue.shift()) {
         const entry = byPath.get(next)
         const local = manifest.local.get(next)
         if (!entry || !local) throw new WizardError('upload_failed', `Portal asked for a file that was not offered: ${next}`)
-        const data = fs.readFileSync(local)
-        const response = await this.call(`/api/deploy/source-uploads/${encodeURIComponent(id)}/files?path=${encodeURIComponent(next)}`, {
-          method: 'PUT', body: data, headers: { 'content-type': 'application/octet-stream' }, timeoutMs: 300_000,
-        }, 'upload_failed')
+        const response = await this.putFile(id, next, local, entry.sizeBytes, stop.signal)
+        if (response.status === 404 || response.status === 410) { gone ??= response.status; stop.abort(new Error('upload gone')); return }
         if (!response.ok) throw new WizardError('upload_failed', `${next}: ${describe(response)}`)
+        sent.add(next)
         done++
-        s.update(`Uploading ${done}/${missing.length}`)
+        doneBytes += entry.sizeBytes
+        progress(done, doneBytes)
       }
     }
-    try {
-      await Promise.all(Array.from({ length: Math.min(3, missing.length) }, worker))
-    } catch (error) {
-      s.fail('Upload failed')
-      throw error
-    }
-    const finalized = await this.call(`/api/deploy/source-uploads/${encodeURIComponent(id)}/finalize`, { method: 'POST' }, 'upload_failed')
-    if (!finalized.ok) { s.fail('Upload failed'); throw new WizardError('upload_failed', `could not finalize the upload: ${describe(finalized)}`) }
-    s.stop(`Uploaded ${missing.length} file${missing.length === 1 ? '' : 's'}, reused ${manifest.entries.length - missing.length}`)
-    return { sourceUploadId: id, uploaded: missing.length, reused: manifest.entries.length - missing.length }
+    await Promise.all(Array.from({ length: workers }, () => worker().catch(error => {
+      if (stop.signal.aborted) return
+      failure ??= error
+      stop.abort(error)
+    })))
+    if (failure) throw failure
+    return gone
   }
 
   /**
